@@ -1,12 +1,13 @@
 import org.dinesh.scrapper.NaukriScrapper;
+import org.dinesh.scrapper.NaukriScrapperChrome;
 
-public class Main {
+public class Main  {
     public static void main(String[] args) {
-        int totalPages = 9;
+        int totalPages = 15;
         Thread[] threads = new Thread[totalPages];
 
         for (int i = 0; i < totalPages; i++) {
-            final int pageNumber = i* 500;
+            final int pageNumber = i* 250;
 
             // Define the Runnable task inline
             Runnable task = new Runnable() {
@@ -15,9 +16,10 @@ public class Main {
                     System.out.println("Fetching page from: " + pageNumber + " by thread " + Thread.currentThread().getName());
                     try {
 //                        Thread.sleep(2000);
-                        NaukriScrapper obj = new NaukriScrapper();
-                        obj.Scrape(pageNumber);
-                        Thread.sleep(2000); // Simulating 2 seconds of work
+                        NaukriScrapperChrome obj = new NaukriScrapperChrome();
+                        obj.Scrape(pageNumber );
+                        Thread.sleep(500); // Simulating 1 seconds of work 0.
+
                     } catch (InterruptedException e) {
                         System.err.println("Thread interrupted while scraping page " + pageNumber);
                     }

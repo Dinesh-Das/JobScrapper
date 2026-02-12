@@ -10,10 +10,7 @@ import org.openqa.selenium.support.ui.WebDriverWait;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -34,15 +31,46 @@ public class NaukriScrapper implements  Scraper{
     @Override
     public void Scrape(int pageNo) {
         System.setProperty("webdriver.edge.driver", "C:\\Users\\dines\\OneDrive\\Desktop\\Project\\JobListingScrapper\\src\\main\\resources\\msedgedriver.exe");
+        EdgeOptions options = new EdgeOptions();
 
-        WebDriver driver = new EdgeDriver();
+//        options.addArguments("--user-data-dir=C:\\Users\\Dinesh\\AppData\\Local\\Microsoft\\Edge\\UserData\\SeleniumProfile");
+//        options.addArguments("--inprivate"); // Keeps session private
+
+//        options.addArguments("--no-first-run");
+//        options.addArguments("--disable-features=msEdgeOnboarding");
+//        options.addArguments("--disable-popup-blocking");
+//        options.addArguments("--disable-infobars");
+//        options.addArguments("--remote-allow-origins=*");
+
+        // HEADLESS CONFIGURATION
+//        options.addArguments("--headless=new"); // New headless mode for better compatibility
+//        options.addArguments("--disable-gpu"); // GPU acceleration disabled for headless
+//        options.addArguments("--no-sandbox"); // Better for CI/CD environments
+//        options.addArguments("--disable-dev-shm-usage"); // Prevents shared memory issues
+//        options.addArguments("--window-size=1920,1080"); // Set window size for consistent rendering
+
+        // PERFORMANCE OPTIMIZATIONS
+        options.addArguments("--disable-extensions"); // Disable extensions
+        options.addArguments("--disable-plugins"); // Disable plugins
+        options.addArguments("--disable-images"); // Disable images for faster loading (optional)
+        options.addArguments("--disable-javascript"); // Disable JS if not needed (be careful with this)
+
+        // OTHER OPTIONS
+        options.addArguments("--no-first-run");
+        options.addArguments("--disable-features=msEdgeOnboarding");
+        options.addArguments("--disable-popup-blocking");
+        options.addArguments("--disable-infobars");
+        options.addArguments("--remote-allow-origins=*");
+
+
+        WebDriver driver = new EdgeDriver(options);
         try {
             driver.get("https://www.naukri.com/software-developer-jobs-in-india-"+pageNo);
             int pageCnt=0;
             while (true) {
                 pageCnt++;
                 set.add(pageCnt+pageNo);
-                WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(30));
+                WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(10));
                 WebElement element = wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".title")));
                 List<WebElement> jobListings = driver.findElements(By.cssSelector(".srp-jobtuple-wrapper"));
                 int elements=0;
@@ -51,13 +79,13 @@ public class NaukriScrapper implements  Scraper{
                 elements++;
                     try {
                         try{
-                        WebElement jobClick = driver.findElement(By.xpath("./html/body/div/div/main/div[1]/div[2]/div[2]/div/div[" + idx + "]/div/div[1]/a"));
+//                        WebElement jobClick = driver.findElement(By.xpath("./html/body/div/div/main/div[1]/div[2]/div[2]/div/div[" + idx + "]/div/div[1]/a"));
                         WebElement titleElement = job.findElement(By.cssSelector(".title"));
                         String url = titleElement.getAttribute("href");
 
-                        if (jobClick.isEnabled()) {
-                            ((JavascriptExecutor) driver).executeScript("arguments[0].click();", jobClick);
-                            Thread.sleep(1500);
+                        if (titleElement.isEnabled()) {
+                            ((JavascriptExecutor) driver).executeScript("arguments[0].click();", titleElement);
+                            Thread.sleep(250);
                             String currentTab = driver.getWindowHandle();
                             wait.until(d -> driver.getWindowHandles().size() > 1);
 
@@ -77,7 +105,7 @@ public class NaukriScrapper implements  Scraper{
                             try{
                                 System.out.println("Promotion hai ");
                                 idx++;
-                                wait = new WebDriverWait(driver, Duration.ofSeconds(30));
+                                wait = new WebDriverWait(driver, Duration.ofSeconds(10));
                                 //a[contains(@class, 'title')]
 
                                 WebElement jobClick = driver.findElement(By.xpath("./html/body/div/div/main/div[1]/div[2]/div[2]/div/div[" + idx + "]/div/div[1]/a"));
@@ -87,7 +115,7 @@ public class NaukriScrapper implements  Scraper{
                                 System.out.println(url);
                                 if (jobClick.isEnabled()) {
                                     ((JavascriptExecutor) driver).executeScript("arguments[0].click();", jobClick);
-                                    Thread.sleep(1500);
+                                    Thread.sleep(250);
                                     String currentTab = driver.getWindowHandle();
                                     wait.until(d -> driver.getWindowHandles().size() > 1);
 
@@ -106,9 +134,8 @@ public class NaukriScrapper implements  Scraper{
                             }catch (Exception e1){
                                 System.out.println("Promotion hai ");
                                 idx++;
-                                wait = new WebDriverWait(driver, Duration.ofSeconds(30));
+                                wait = new WebDriverWait(driver, Duration.ofSeconds(10));
                                 //a[contains(@class, 'title')]
-
                                 WebElement jobClick = driver.findElement(By.xpath("./html/body/div/div/main/div[1]/div[2]/div[2]/div/div[" + idx + "]/div/div[1]/a"));
 
                                 WebElement titleElement = job.findElement(By.cssSelector(".title"));
@@ -116,7 +143,7 @@ public class NaukriScrapper implements  Scraper{
                                 System.out.println(url);
                                 if (jobClick.isEnabled()) {
                                     ((JavascriptExecutor) driver).executeScript("arguments[0].click();", jobClick);
-                                    Thread.sleep(1500);
+                                    Thread.sleep(250);
                                     String currentTab = driver.getWindowHandle();
                                     wait.until(d -> driver.getWindowHandles().size() > 1);
 
@@ -149,9 +176,9 @@ public class NaukriScrapper implements  Scraper{
                     // Click the "Next" button using JavaScript
                     ((JavascriptExecutor) driver).executeScript("arguments[0].click();", nextButton);
 
-                    Thread.sleep(1500);
+                    Thread.sleep(250);
                     // Wait for the next page to load
-                    WebDriverWait pageLoadWait = new WebDriverWait(driver, Duration.ofSeconds(30));
+                    WebDriverWait pageLoadWait = new WebDriverWait(driver, Duration.ofSeconds(10));
                     pageLoadWait.until(ExpectedConditions.stalenessOf(jobListings.get(0)));
 
                 } else {
@@ -159,6 +186,7 @@ public class NaukriScrapper implements  Scraper{
                     System.out.println("No more pages to scrape.");
                     break;
                 }
+                if(set.size()==1000) break;
             }
         } catch (Exception e) {
             e.printStackTrace();

@@ -17,7 +17,7 @@ public class DatabaseHandler {
     private static final Logger LOGGER = Logger.getLogger(DatabaseHandler.class.getName());
     private static final String DB_URL = "jdbc:oracle:thin:@127.0.0.1:1521:XE"; // Update Oracle DB URL
     private static final String USER = "system";
-    private static final String PASS = "admin";
+    private static final String PASS = "root";
 
     static {
         try (FileInputStream configFile = new FileInputStream("C:\\Users\\dines\\OneDrive\\Desktop\\Project\\JobListingScrapper\\src\\main\\java\\org\\dinesh\\database\\logger.properties")) {
