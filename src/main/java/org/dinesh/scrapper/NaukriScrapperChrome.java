@@ -25,11 +25,53 @@ public class NaukriScrapperChrome implements Scraper {
             return "";
         }
     }
+    
+    private String extractNumber(String text) {
+        if (text == null || text.isEmpty()) return "0";
+        text = text.replaceAll("[^0-9]", "");
+        return text.isEmpty() ? "0" : text;
+    }
+    
+    private String cleanCompanyName(String companyName) {
+        if (companyName == null || companyName.isEmpty()) return "";
+        // Remove rating/reviews text like "4.5 Reviews" or "Employees' choice"
+        return companyName.replaceAll("(?i)[\\n\\r]?[0-9\\.]+\\s*Reviews.*|Employees'\\s*choice.*", "").trim();
+    }
+    
+    private String parsePosted(String postedText) {
+        if (postedText == null || postedText.isEmpty()) return "0";
+        if (postedText.toLowerCase().contains("just now")) return "0";
+        
+        // Extract number from "4 days ago" or "Posted: 4 days ago"
+        String number = postedText.replaceAll("(?i)Posted:\\s*", "")
+                                   .replaceAll("(?i)\\s*days?\\s*ago.*", "")
+                                   .replaceAll("[^0-9+]", "");
+        return number.isEmpty() ? "0" : number;
+    }
+    
+    private String parseOpenings(String openingsText) {
+        if (openingsText == null || openingsText.isEmpty()) return "1";
+        
+        // Extract number from "Openings: 5" or just "5"
+        String number = openingsText.replaceAll("(?i)Openings:\\s*", "")
+                                     .replaceAll("[^0-9]", "");
+        return number.isEmpty() ? "1" : number;
+    }
+    
+    private String parseApplications(String applicationsText) {
+        if (applicationsText == null || applicationsText.isEmpty()) return "0";
+        
+        // Handle "Less than 50" or "Applicants: 100"
+        String number = applicationsText.replaceAll("(?i)Applicants:\\s*", "")
+                                        .replaceAll("(?i)Less\\s*than\\s*", "")
+                                        .replaceAll("[^0-9]", "");
+        return number.isEmpty() ? "0" : number;
+    }
 
     @Override
     public void Scrape(int pageNo) {
         // ChromeDriver setup
-        System.setProperty("webdriver.chrome.driver", "src\main\resources\chromedriver.exe");
+        System.setProperty("webdriver.chrome.driver", "src\\main\\resources\\chromedriver.exe");
 
         ChromeOptions options = new ChromeOptions();
 
@@ -185,27 +227,104 @@ public class NaukriScrapperChrome implements Scraper {
             for (WebElement jd : jobDescriptions) {
                 try {
                     String title = safeGetText(jd, By.cssSelector(".styles_jd-header-title__rZwM1"));
-                    String company = safeGetText(jd, By.cssSelector(".styles_jd-header-comp-name__MvqAI"));
+                    String companyRaw = safeGetText(jd, By.cssSelector(".styles_jd-header-comp-name__MvqAI a"));
+                    String company = cleanCompanyName(companyRaw);
                     String rating = safeGetText(jd, By.cssSelector(".styles_amb-rating__4UyFL"));
-                    String reviews = safeGetText(jd, By.cssSelector(".styles_amb-reviews__0J1e3"));
-                    String exp = safeGetText(jd, By.cssSelector(".styles_jhc__exp__k_giM"));
-                    String salary = safeGetText(jd, By.cssSelector(".styles_jhc__salary__jdfEC"));
-                    String location = safeGetText(jd, By.cssSelector(".styles_jhc__loc___Du2H"));
-                    String posted = safeGetText(jd, By.cssSelector(".styles_jhc__bottom__DrTmB"));
-                    String openings = safeGetText(jd, By.cssSelector(".styles_jhc__bottom__DrTmB"));
-                    String application = safeGetText(jd, By.cssSelector(".styles_jhc__bottom__DrTmB"));
-                    String jobDesc = safeGetText(jd, By.cssSelector(".styles_job-desc-container__txpYf"));
-                    String role = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
-                    String industry = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
-                    String depart = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
-                    String employmentType = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
-                    String roleCat = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
-                    String edu = safeGetText(jd, By.cssSelector(".styles_education__KXFkO"));
+                    String reviewsRaw = safeGetText(jd, By.cssSelector(".styles_amb-reviews__0J1e3"));
+                    String reviews = extractNumber(reviewsRaw);
+                    String exp = safeGetText(jd, By.cssSelector(".styles_jhc__exp__k_giM span"));
+                    String salary = safeGetText(jd, By.cssSelector(".styles_jhc__salary__jdfEC span"));
+                    String location = safeGetText(jd, By.cssSelector(".styles_jhc__loc___Du2H span"));
+                    
+                    // Extract and parse posted/openings/applications
+                    String postedRaw = "";
+                    String openingsRaw = "";
+                    String applicationRaw = "";
+                    
+                    try {
+                        List<WebElement> stats = jd.findElements(By.cssSelector(".styles_jhc__jd-stats__KrId0 .styles_jhc__stat__PgY67"));
+                        for (WebElement stat : stats) {
+                            String statText = stat.getText();
+                            if (statText.contains("Posted:") || statText.contains("days ago") || statText.contains("Just now")) {
+                                postedRaw = statText;
+                            } else if (statText.contains("Openings:")) {
+                                openingsRaw = statText;
+                            } else if (statText.contains("Applicants:") || statText.contains("Less than")) {
+                                applicationRaw = statText;
+                            }
+                        }
+                    } catch (Exception e) {
+                        // Fallback
+                        String bottomText = safeGetText(jd, By.cssSelector(".styles_jhc__bottom__DrTmB"));
+                        postedRaw = bottomText;
+                        openingsRaw = bottomText;
+                        applicationRaw = bottomText;
+                    }
+                    
+                    // Parse and clean the values
+                    String posted = parsePosted(postedRaw);
+                    String openings = parseOpenings(openingsRaw);
+                    String application = parseApplications(applicationRaw);
+                    
+                    String jobDesc = safeGetText(jd, By.cssSelector(".styles_JDC__dang-inner-html__h0K4t"));
+                    
+                    // Extract role details separately
+                    String role = "";
+                    String industry = "";
+                    String depart = "";
+                    String employmentType = "";
+                    String roleCat = "";
+                    try {
+                        List<WebElement> details = jd.findElements(By.cssSelector(".styles_other-details__oEN4O .styles_details__Y424J"));
+                        for (WebElement detail : details) {
+                            String labelText = safeGetText(detail, By.cssSelector("label"));
+                            String valueText = detail.getText().replace(labelText, "").trim();
+                            
+                            if (labelText.contains("Role:")) {
+                                role = valueText;
+                            } else if (labelText.contains("Industry Type:")) {
+                                industry = valueText;
+                            } else if (labelText.contains("Department:")) {
+                                depart = valueText;
+                            } else if (labelText.contains("Employment Type:")) {
+                                employmentType = valueText;
+                            } else if (labelText.contains("Role Category:")) {
+                                roleCat = valueText;
+                            }
+                        }
+                    } catch (Exception e) {
+                        // Fallback
+                        String otherDetails = safeGetText(jd, By.cssSelector(".styles_other-details__oEN4O"));
+                        role = otherDetails;
+                        industry = otherDetails;
+                        depart = otherDetails;
+                        employmentType = otherDetails;
+                        roleCat = otherDetails;
+                    }
+                    
+                    // Extract education
+                    String edu = "";
+                    try {
+                        StringBuilder education = new StringBuilder();
+                        List<WebElement> eduDetails = jd.findElements(By.cssSelector(".styles_education__KXFkO .styles_details__Y424J"));
+                        for (WebElement eduDetail : eduDetails) {
+                            String eduText = eduDetail.getText();
+                            if (!eduText.isEmpty()) {
+                                education.append(eduText).append("\n");
+                            }
+                        }
+                        edu = education.toString().trim();
+                    } catch (Exception e) {
+                        edu = safeGetText(jd, By.cssSelector(".styles_education__KXFkO"));
+                    }
+                    
                     String keySkill = "";
-
-                    List<WebElement> keySkills = driver.findElements(By.cssSelector("a.styles_chip__7YCfG span"));
+                    List<WebElement> keySkills = driver.findElements(By.cssSelector(".styles_key-skill__GIPn_ a.styles_chip__7YCfG span"));
                     for (WebElement skill : keySkills) {
-                        keySkill += skill.getText() + ",";
+                        String skillText = skill.getText();
+                        if (!skillText.isEmpty()) {
+                            keySkill += skillText + ",";
+                        }
                     }
 
                     JobListingEntity obj = new JobListingEntity();
@@ -235,6 +354,7 @@ public class NaukriScrapperChrome implements Scraper {
                     DatabaseHandler.saveJob(obj);
                 } catch (Exception e) {
                     System.out.println("Error In New Page Maybe Layout Change: " + e.getMessage());
+                    e.printStackTrace();
                 }
             }
         } catch(Exception e) {

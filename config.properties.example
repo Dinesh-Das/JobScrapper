@@ -1,0 +1,25 @@
+# Database Configuration
+# Copy this file to config.properties and update with your credentials
+db.url=jdbc:oracle:thin:@127.0.0.1:1521:XE
+db.user=system
+db.password=root
+db.pool.size=10
+db.connection.timeout=30000
+
+# Scraper Configuration
+# Reduce threads if getting rate-limited, increase for speed
+scraper.threads=5
+scraper.total.pages=15
+scraper.page.offset=250
+scraper.max.pages.per.thread=1000
+scraper.page.load.delay=500
+
+# Batch size: Higher = faster but more memory
+# Recommended: 25-100
+scraper.batch.size=50
+
+# Browser Configuration
+# Enable headless for 30% speed boost
+browser.headless=false
+browser.disable.images=false
+browser.wait.timeout=10
