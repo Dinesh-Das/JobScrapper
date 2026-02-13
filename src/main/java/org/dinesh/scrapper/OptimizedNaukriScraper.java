@@ -87,55 +87,51 @@ public class OptimizedNaukriScraper implements Scraper {
             driver.get("https://www.naukri.com/software-developer-jobs-in-india-" + pageNo);
             System.out.println("Thread " + Thread.currentThread().getName() + " - Page loaded, waiting for elements");
             
-            int pageCnt = 0;
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Config.getBrowserWaitTimeout()));
+            System.out.println("Thread " + Thread.currentThread().getName() + " - Waiting for .title elements");
             
-            while (pageCnt < Config.getMaxPagesPerThread()) {
-                pageCnt++;
-                processedPages.add(pageCnt + pageNo);
-                
-                WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Config.getBrowserWaitTimeout()));
-                System.out.println("Thread " + Thread.currentThread().getName() + " - Waiting for .title elements");
-                
+            try {
+                wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".title")));
+            } catch (Exception e) {
+                System.err.println("Thread " + Thread.currentThread().getName() + " - Timeout waiting for .title on page " + pageNo);
+                System.err.println("Current URL: " + driver.getCurrentUrl());
+                System.err.println("Page title: " + driver.getTitle());
+                System.err.println("Error: " + e.getMessage());
+                return;
+            }
+            
+            System.out.println("Thread " + Thread.currentThread().getName() + " - Found .title elements");
+            List<WebElement> jobListings = driver.findElements(By.cssSelector(".srp-jobtuple-wrapper"));
+            System.out.println("Thread " + Thread.currentThread().getName() + " - Page " + pageNo + " has " + jobListings.size() + " job listings");
+            
+            if (jobListings.isEmpty()) {
+                System.out.println("Thread " + Thread.currentThread().getName() + " - No jobs found on page " + pageNo + ", skipping");
+                return;
+            }
+            
+            int idx = 1;
+            
+            for (WebElement job : jobListings) {
                 try {
-                    wait.until(ExpectedConditions.visibilityOfElementLocated(By.cssSelector(".title")));
+                    processJobListing(driver, job, wait, idx);
                 } catch (Exception e) {
-                    System.err.println("Thread " + Thread.currentThread().getName() + " - Timeout waiting for .title: " + e.getMessage());
-                    System.err.println("Current URL: " + driver.getCurrentUrl());
-                    System.err.println("Page title: " + driver.getTitle());
-                    break;
+                    System.err.println("Thread " + Thread.currentThread().getName() + " - Error processing job at index " + idx + " on page " + pageNo + ": " + e.getMessage());
                 }
+                idx++;
                 
-                System.out.println("Thread " + Thread.currentThread().getName() + " - Found .title elements");
-                List<WebElement> jobListings = driver.findElements(By.cssSelector(".srp-jobtuple-wrapper"));
-                System.out.println("Thread " + Thread.currentThread().getName() + " - Found " + jobListings.size() + " job listings");
-                int idx = 1;
-                
-                for (WebElement job : jobListings) {
-                    try {
-                        processJobListing(driver, job, wait, idx);
-                    } catch (Exception e) {
-                        System.err.println("Error processing job at index " + idx + ": " + e.getMessage());
-                    }
-                    idx++;
-                    
-                    // Flush batch if full
-                    if (jobBatch.size() >= batchSize) {
-                        flushBatch();
-                    }
+                // Flush batch if full
+                if (jobBatch.size() >= batchSize) {
+                    flushBatch();
                 }
-                
-                // Navigate to next page
-                if (!navigateToNextPage(driver, jobListings)) {
-                    break;
-                }
-                
-                Thread.sleep(Config.getPageLoadDelay());
             }
             
             // Flush remaining jobs
             flushBatch();
             
+            System.out.println("Thread " + Thread.currentThread().getName() + " - Successfully completed page: " + pageNo);
+            
         } catch (Exception e) {
+            System.err.println("Thread " + Thread.currentThread().getName() + " - Fatal error on page " + pageNo);
             e.printStackTrace();
         } finally {
             driver.quit();

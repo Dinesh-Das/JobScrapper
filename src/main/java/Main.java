@@ -19,12 +19,14 @@ public class Main {
         System.out.println("Thread pool size: " + threadPoolSize);
         System.out.println("Batch size: " + Config.getBatchSize());
         System.out.println("Headless mode: " + Config.isBrowserHeadless());
+        System.out.println("Starting from page: " + pageOffset);
         
         // Use ExecutorService for better thread management
         ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
         
+        // Sequential page numbers: pageOffset, pageOffset+1, pageOffset+2, etc.
         for (int i = 0; i < totalPages; i++) {
-            final int pageNumber = i * pageOffset;
+            final int pageNumber = pageOffset + i;
             
             executor.submit(() -> {
                 System.out.println("Thread " + Thread.currentThread().getName() + 

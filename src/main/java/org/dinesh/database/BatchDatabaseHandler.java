@@ -7,6 +7,7 @@ import org.dinesh.entity.JobListingEntity;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -46,10 +47,13 @@ public class BatchDatabaseHandler {
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, SYSTIMESTAMP)";
         
         int savedCount = 0;
+        Connection conn = null;
+        PreparedStatement ps = null;
+        List<CLOB> clobsToFree = new ArrayList<>();
         
-        try (Connection conn = ConnectionPool.getConnection();
-             PreparedStatement ps = conn.prepareStatement(sql)) {
-            
+        try {
+            conn = ConnectionPool.getConnection();
+            ps = conn.prepareStatement(sql);
             conn.setAutoCommit(false);
             
             // Unwrap HikariCP proxy to get the real OracleConnection
@@ -64,12 +68,15 @@ public class BatchDatabaseHandler {
                     // Create CLOBs using unwrapped connection
                     CLOB jobDescClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
                     jobDescClob.setString(1, job.getJobDescription() != null ? job.getJobDescription() : "");
+                    clobsToFree.add(jobDescClob);
                     
                     CLOB eduClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
                     eduClob.setString(1, job.getEducation() != null ? job.getEducation() : "");
+                    clobsToFree.add(eduClob);
                     
                     CLOB skillsClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
                     skillsClob.setString(1, job.getKeySkills() != null ? job.getKeySkills() : "");
+                    clobsToFree.add(skillsClob);
                     
                     // UPDATE parameters
                     ps.setString(1, job.getUrl());
@@ -121,16 +128,46 @@ public class BatchDatabaseHandler {
                 }
             }
             
-            // Execute batch
-            int[] results = ps.executeBatch();
-            conn.commit();
+            // Execute batch BEFORE freeing CLOBs
+            if (savedCount > 0) {
+                int[] results = ps.executeBatch();
+                conn.commit();
+                LOGGER.log(Level.INFO, "Batch saved {0} jobs successfully", savedCount);
+            }
             
-            LOGGER.log(Level.INFO, "Batch saved {0} jobs successfully", savedCount);
             return savedCount;
             
         } catch (SQLException e) {
             LOGGER.log(Level.SEVERE, "Batch insert failed", e);
+            // Rollback on error
+            if (conn != null) {
+                try {
+                    conn.rollback();
+                } catch (SQLException ex) {
+                    LOGGER.log(Level.SEVERE, "Rollback failed", ex);
+                }
+            }
             return 0;
+        } finally {
+            // Free CLOBs AFTER batch execution
+            for (CLOB clob : clobsToFree) {
+                try {
+                    if (clob != null) clob.freeTemporary();
+                } catch (SQLException e) {
+                    // Ignore cleanup errors
+                }
+            }
+            
+            // Always close resources
+            try {
+                if (ps != null) ps.close();
+                if (conn != null) {
+                    conn.setAutoCommit(true); // Reset auto-commit
+                    conn.close();
+                }
+            } catch (SQLException e) {
+                LOGGER.log(Level.WARNING, "Error closing resources", e);
+            }
         }
     }
 }
