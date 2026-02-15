@@ -10,7 +10,7 @@ db.connection.timeout=30000
 # Reduce threads if getting rate-limited, increase for speed
 scraper.threads=5
 scraper.total.pages=15
-scraper.page.offset=250
+scraper.page.offset=1
 scraper.max.pages.per.thread=1000
 scraper.page.load.delay=500
 
@@ -18,8 +18,34 @@ scraper.page.load.delay=500
 # Recommended: 25-100
 scraper.batch.size=50
 
+# Job search URL with {page} placeholder
+scraper.job.search.url=https://www.naukri.com/software-developer-jobs-in-india-{page}
+
+# Retry configuration
+scraper.max.retries=3
+scraper.retry.delay=5000
+
+# Progress tracking
+scraper.progress.file=scraper_progress.txt
+
+# Duplicate detection (set to false for faster scraping)
+scraper.check.duplicates=true
+
+# Upsert duplicates (update existing records instead of skipping)
+# If true: duplicates will be updated with latest data
+# If false: duplicates will be skipped (faster)
+scraper.upsert.duplicates=false
+
+# Rate limiting delay (milliseconds between successful scrapes)
+scraper.rate.limit.delay=2000
+
+# Circuit breaker threshold (consecutive errors before stopping)
+scraper.circuit.breaker.threshold=5
+
 # Browser Configuration
 # Enable headless for 30% speed boost
 browser.headless=false
 browser.disable.images=false
 browser.wait.timeout=10
+browser.tab.switch.timeout=10
+browser.click.delay=250

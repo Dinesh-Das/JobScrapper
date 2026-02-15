@@ -39,4 +39,5 @@ build/
 
 ### Application Config ###
 config.properties
-application.log
+application1.log
+scraper_progress.txt

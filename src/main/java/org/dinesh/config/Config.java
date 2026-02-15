@@ -37,6 +37,10 @@ public class Config {
         return Integer.parseInt(props.getProperty("db.connection.timeout", "30000"));
     }
     
+    public static int getDbLeakDetectionThreshold() {
+        return Integer.parseInt(props.getProperty("db.leak.detection.threshold", "120000"));
+    }
+    
     // Scraper
     public static int getScraperThreads() {
         return Integer.parseInt(props.getProperty("scraper.threads", "5"));
@@ -50,16 +54,48 @@ public class Config {
         return Integer.parseInt(props.getProperty("scraper.page.offset", "250"));
     }
     
-    public static int getMaxPagesPerThread() {
-        return Integer.parseInt(props.getProperty("scraper.max.pages.per.thread", "1000"));
-    }
-    
     public static int getPageLoadDelay() {
         return Integer.parseInt(props.getProperty("scraper.page.load.delay", "500"));
     }
     
     public static int getBatchSize() {
         return Integer.parseInt(props.getProperty("scraper.batch.size", "50"));
+    }
+    
+    public static String getJobSearchUrl() {
+        return props.getProperty("scraper.job.search.url", "https://www.naukri.com/software-developer-jobs-in-india-{page}");
+    }
+    
+    public static int getMaxRetries() {
+        return Integer.parseInt(props.getProperty("scraper.max.retries", "3"));
+    }
+    
+    public static int getRetryDelay() {
+        return Integer.parseInt(props.getProperty("scraper.retry.delay", "5000"));
+    }
+    
+    public static boolean isCheckDuplicates() {
+        return Boolean.parseBoolean(props.getProperty("scraper.check.duplicates", "true"));
+    }
+    
+    public static boolean isUpsertDuplicates() {
+        return Boolean.parseBoolean(props.getProperty("scraper.upsert.duplicates", "false"));
+    }
+    
+    public static int getRateLimitDelay() {
+        return Integer.parseInt(props.getProperty("scraper.rate.limit.delay", "2000"));
+    }
+    
+    public static int getCircuitBreakerThreshold() {
+        return Integer.parseInt(props.getProperty("scraper.circuit.breaker.threshold", "5"));
+    }
+    
+    public static int getTabSwitchTimeout() {
+        return Integer.parseInt(props.getProperty("browser.tab.switch.timeout", "10"));
+    }
+    
+    public static int getClickDelay() {
+        return Integer.parseInt(props.getProperty("browser.click.delay", "250"));
     }
     
     // Browser
