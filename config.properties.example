@@ -6,6 +6,14 @@ db.password=root
 db.pool.size=10
 db.connection.timeout=30000
 
+# Leak detection threshold (milliseconds) - how long before warning about held connections
+# Default: 120000 (2 minutes)
+db.leak.detection.threshold=120000
+
+# Sub-batch size for database operations - smaller batches = shorter connection hold time
+# Recommended: 20-30 for CLOB operations
+db.sub.batch.size=25
+
 # Scraper Configuration
 # Reduce threads if getting rate-limited, increase for speed
 scraper.threads=5

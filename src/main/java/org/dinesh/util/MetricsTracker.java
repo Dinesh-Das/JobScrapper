@@ -16,6 +16,7 @@ public class MetricsTracker {
     private static final AtomicInteger jobsUpdated = new AtomicInteger(0);
     private static final AtomicInteger errors = new AtomicInteger(0);
     private static final AtomicInteger duplicatesSkipped = new AtomicInteger(0);
+    private static final AtomicInteger expiredJobs = new AtomicInteger(0);
     private static final AtomicLong totalProcessingTime = new AtomicLong(0);
     
     public static void incrementPagesProcessed() {
@@ -46,6 +47,10 @@ public class MetricsTracker {
         duplicatesSkipped.addAndGet(count);
     }
     
+    public static void incrementExpiredJobs() {
+        expiredJobs.incrementAndGet();
+    }
+    
     public static void addProcessingTime(long milliseconds) {
         totalProcessingTime.addAndGet(milliseconds);
     }
@@ -62,6 +67,7 @@ public class MetricsTracker {
         logger.info("  - Inserted: " + jobsInserted.get());
         logger.info("  - Updated: " + jobsUpdated.get());
         logger.info("Duplicates skipped: " + duplicatesSkipped.get());
+        logger.info("Expired jobs skipped: " + expiredJobs.get());
         logger.info("Errors: " + errors.get());
         
         if (elapsedSeconds > 0) {

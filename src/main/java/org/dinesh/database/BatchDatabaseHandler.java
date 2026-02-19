@@ -264,6 +264,29 @@ public class BatchDatabaseHandler {
             return 0;
         }
         
+        // Process in smaller sub-batches to avoid connection leak detection
+        // Large batches with CLOBs can hold connections for too long
+        final int SUB_BATCH_SIZE = Config.getDbSubBatchSize();
+        int totalSaved = 0;
+        
+        for (int i = 0; i < jobs.size(); i += SUB_BATCH_SIZE) {
+            int endIndex = Math.min(i + SUB_BATCH_SIZE, jobs.size());
+            List<JobListingEntity> subBatch = jobs.subList(i, endIndex);
+            totalSaved += saveSubBatch(subBatch, forceUpsert);
+        }
+        
+        return totalSaved;
+    }
+    
+    /**
+     * Save a sub-batch of jobs (internal method to keep connection time short)
+     */
+    private static int saveSubBatch(List<JobListingEntity> jobs, boolean forceUpsert) throws SQLException {
+        if (jobs == null || jobs.isEmpty()) {
+            LOGGER.log(Level.WARNING, "No jobs to save");
+            return 0;
+        }
+        
         // Use MERGE or INSERT based on forceUpsert flag
         boolean useUpsert = forceUpsert || Config.isUpsertDuplicates();
         

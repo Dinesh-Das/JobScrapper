@@ -30,6 +30,54 @@ public class Main {
         }
     }
     
+    /**
+     * Utility method to load URLs from one or more checkpoint files
+     * Automatically deduplicates URLs using Set
+     */
+    private static Set<String> loadUrlsFromFiles(String... filePaths) {
+        Set<String> urls = new LinkedHashSet<>(); // Preserves insertion order
+        int totalLines = 0;
+        int duplicatesSkipped = 0;
+        
+        for (String filePath : filePaths) {
+            java.io.File file = new java.io.File(filePath);
+            if (!file.exists()) {
+                logger.warning("File not found: " + filePath);
+                continue;
+            }
+            
+            try {
+                logger.info("Loading URLs from: " + filePath);
+                java.io.BufferedReader reader = new java.io.BufferedReader(new java.io.FileReader(file));
+                String line;
+                int fileLines = 0;
+                
+                while ((line = reader.readLine()) != null) {
+                    if (!line.trim().isEmpty()) {
+                        totalLines++;
+                        fileLines++;
+                        // Set.add() returns false if element already exists
+                        if (!urls.add(line.trim())) {
+                            duplicatesSkipped++;
+                        }
+                    }
+                }
+                reader.close();
+                logger.info("  - Loaded " + fileLines + " lines from " + filePath);
+                
+            } catch (Exception e) {
+                logger.warning("Failed to load file " + filePath + ": " + e.getMessage());
+            }
+        }
+        
+        logger.info("=== URL Loading Summary ===");
+        logger.info("Total lines read: " + totalLines);
+        logger.info("Unique URLs: " + urls.size());
+        logger.info("Duplicates removed: " + duplicatesSkipped);
+        
+        return urls;
+    }
+    
     public static void main(String[] args) {
         // Register shutdown hook for graceful termination
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -89,66 +137,115 @@ public class Main {
         logger.info("Starting from page: " + pageOffset);
         logger.info("Connection pool: " + ResilientConnectionPool.getStats());
         
-        // PHASE 1: Collect all URLs from search pages (fast, lightweight)
-        logger.info("\n=== PHASE 1: Collecting URLs from search pages ===");
+        // Use Set to automatically deduplicate URLs
         Set<String> allUrls = ConcurrentHashMap.newKeySet();
-        ExecutorService phase1Executor = Executors.newFixedThreadPool(threadPoolSize);
         
-        // Track pages processed per thread for driver restart
-        java.util.concurrent.atomic.AtomicInteger pagesProcessedCount = new java.util.concurrent.atomic.AtomicInteger(0);
+        // Check if checkpoint file(s) exist (resume from previous run)
+        java.io.File checkpointFile = new java.io.File("urls_checkpoint.txt");
+        java.io.File checkpoint1File = new java.io.File("1urls_checkpoint.txt");
         
-        for (int i = 0; i < totalPages; i++) {
-            final int pageNumber = pageOffset + i;
-            
-            if (shutdownRequested) {
-                logger.info("Shutdown requested, stopping URL collection");
-                break;
-            }
-            
-            phase1Executor.submit(() -> {
-                try {
-                    if (shutdownRequested) return;
-                    
-                    TwoPhaseNaukriScraper scraper = new TwoPhaseNaukriScraper();
-                    Set<String> pageUrls = scraper.collectUrlsFromPage(pageNumber);
-                    allUrls.addAll(pageUrls);
-                    logger.info("Page " + pageNumber + ": Collected " + pageUrls.size() + " URLs");
-                    MetricsTracker.incrementPagesProcessed(); // Track Phase 1 pages
-                    
-                    // Restart driver every 100 pages to prevent crashes
-                    int processed = pagesProcessedCount.incrementAndGet();
-                    if (processed % 100 == 0) {
-                        logger.info("Restarting driver after " + processed + " pages...");
-                        TwoPhaseNaukriScraper.cleanupThreadDriver();
-                    }
-                    
-                } catch (Exception e) {
-                    logger.severe("Failed to collect URLs from page " + pageNumber + ": " + e.getMessage());
-                    MetricsTracker.incrementErrors();
-                }
-            });
+        // Check for multiple checkpoint files to merge
+        List<String> checkpointFiles = new ArrayList<>();
+        if (checkpointFile.exists()) {
+            checkpointFiles.add("urls_checkpoint.txt");
+        }
+        if (checkpoint1File.exists()) {
+            checkpointFiles.add("1urls_checkpoint.txt");
         }
         
-        phase1Executor.shutdown();
-        try {
-            // Increase timeout for large page counts (10 hours for 7100 pages)
-            long timeoutHours = Math.max(2, (totalPages / 100) + 1);
-            logger.info("Phase 1 timeout set to " + timeoutHours + " hours");
+        // Load from checkpoint files if they exist
+        if (!checkpointFiles.isEmpty() && totalPages > 0) {
+            logger.info("Found " + checkpointFiles.size() + " checkpoint file(s)");
+            logger.info("Loading and merging URLs (duplicates will be automatically removed)...");
             
-            if (!phase1Executor.awaitTermination(timeoutHours, TimeUnit.HOURS)) {
-                logger.severe("Phase 1 timeout after " + timeoutHours + " hours, forcing shutdown...");
+            try {
+                // Load URLs from all checkpoint files (automatically deduplicates)
+                Set<String> loadedUrls = loadUrlsFromFiles(checkpointFiles.toArray(new String[0]));
+                allUrls.addAll(loadedUrls);
+                
+                logger.info("Skipping Phase 1 - using checkpoint data");
+                
+                // Skip Phase 1
+                totalPages = 0;
+            } catch (Exception e) {
+                logger.warning("Failed to load checkpoint files: " + e.getMessage());
+                logger.info("Will run Phase 1 normally");
+            }
+        }
+        
+        // PHASE 1: Collect all URLs from search pages (fast, lightweight)
+        if (totalPages > 0) {
+            logger.info("\n=== PHASE 1: Collecting URLs from search pages ===");
+            ExecutorService phase1Executor = Executors.newFixedThreadPool(threadPoolSize);
+            
+            // Track pages processed per thread for driver restart
+            java.util.concurrent.atomic.AtomicInteger pagesProcessedCount = new java.util.concurrent.atomic.AtomicInteger(0);
+            
+            for (int i = 0; i < totalPages; i++) {
+                final int pageNumber = pageOffset + i;
+                
+                if (shutdownRequested) {
+                    logger.info("Shutdown requested, stopping URL collection");
+                    break;
+                }
+                
+                phase1Executor.submit(() -> {
+                    try {
+                        if (shutdownRequested) return;
+                        
+                        TwoPhaseNaukriScraper scraper = new TwoPhaseNaukriScraper();
+                        Set<String> pageUrls = scraper.collectUrlsFromPage(pageNumber);
+                        allUrls.addAll(pageUrls);
+                        MetricsTracker.incrementPagesProcessed(); // Track Phase 1 pages
+                        
+                        // Restart driver every 100 pages to prevent crashes
+                        int processed = pagesProcessedCount.incrementAndGet();
+                        if (processed % 100 == 0) {
+                            logger.info("Restarting driver after " + processed + " pages...");
+                            TwoPhaseNaukriScraper.cleanupThreadDriver();
+                        }
+                        
+                    } catch (Exception e) {
+                        logger.severe("Failed to collect URLs from page " + pageNumber + ": " + e.getMessage());
+                        MetricsTracker.incrementErrors();
+                    }
+                });
+            }
+            
+            phase1Executor.shutdown();
+            try {
+                // Increase timeout for large page counts (10 hours for 7100 pages)
+                long timeoutHours = Math.max(2, (totalPages / 100) + 1);
+                logger.info("Phase 1 timeout set to " + timeoutHours + " hours");
+                
+                if (!phase1Executor.awaitTermination(timeoutHours, TimeUnit.HOURS)) {
+                    logger.severe("Phase 1 timeout after " + timeoutHours + " hours, forcing shutdown...");
+                    phase1Executor.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                logger.severe("Phase 1 interrupted");
                 phase1Executor.shutdownNow();
             }
-        } catch (InterruptedException e) {
-            logger.severe("Phase 1 interrupted");
-            phase1Executor.shutdownNow();
+            
+            // Cleanup all Phase 1 drivers
+            logger.info("Cleaning up Phase 1 drivers...");
+            TwoPhaseNaukriScraper.cleanupAllThreadDrivers();
+            
+            logger.info("Phase 1 complete: Collected " + allUrls.size() + " total URLs");
+            
+            // Save URLs to checkpoint file for resume capability
+            try {
+                java.io.File checkpointFileFile = new java.io.File("urls_checkpoint.txt");
+                java.io.PrintWriter writer = new java.io.PrintWriter(checkpointFile);
+                for (String url : allUrls) {
+                    writer.println(url);
+                }
+                writer.close();
+                logger.info("Saved " + allUrls.size() + " URLs to urls_checkpoint.txt");
+            } catch (Exception e) {
+                logger.warning("Failed to save checkpoint file: " + e.getMessage());
+            }
         }
-        
-        // Cleanup all Phase 1 drivers
-        logger.info("Cleaning up Phase 1 drivers...");
-        TwoPhaseNaukriScraper.cleanupAllThreadDrivers();
-        
-        logger.info("Phase 1 complete: Collected " + allUrls.size() + " total URLs");
         
         // Filter out URLs already in database (if duplicate check enabled)
         Set<String> urlsToScrape = allUrls;
@@ -188,13 +285,16 @@ public class Main {
         
         List<String> urlList = new ArrayList<>(urlsToScrape);
         
-        // Create a shared scraper instance to accumulate batches
+        // Create a shared scraper instance to accumulate batches (thread-safe for batch operations)
         TwoPhaseNaukriScraper sharedScraper = new TwoPhaseNaukriScraper();
         
         // Progress tracking
         java.util.concurrent.atomic.AtomicInteger processedCount = new java.util.concurrent.atomic.AtomicInteger(0);
         java.util.concurrent.atomic.AtomicInteger urlsProcessedCount = new java.util.concurrent.atomic.AtomicInteger(0);
         int totalUrls = urlList.size();
+        
+        // Track URLs processed per thread for periodic driver restart
+        ThreadLocal<Integer> threadUrlCount = ThreadLocal.withInitial(() -> 0);
         
         for (String url : urlList) {
             if (shutdownRequested) {
@@ -206,19 +306,20 @@ public class Main {
                 try {
                     if (shutdownRequested) return;
                     
+                    // Restart driver every 300 URLs per thread to prevent memory leaks and crashes
+                    int count = threadUrlCount.get();
+                    if (count > 0 && count % 300 == 0) {
+                        logger.info(Thread.currentThread().getName() + ": Restarting driver after " + count + " URLs...");
+                        TwoPhaseNaukriScraper.cleanupThreadDriver();
+                    }
+                    threadUrlCount.set(count + 1);
+                    
                     sharedScraper.scrapeJobDetails(url);
                     
                     int processed = processedCount.incrementAndGet();
-                    if (processed % 50 == 0 || processed == totalUrls) {
+                    if (processed % 100 == 0 || processed == totalUrls) {
                         logger.info("Phase 2 progress: " + processed + "/" + totalUrls + " URLs processed (" + 
                                    String.format("%.1f", (processed * 100.0 / totalUrls)) + "%)");
-                    }
-                    
-                    // Restart driver every 200 URLs to prevent crashes
-                    int urlsProcessed = urlsProcessedCount.incrementAndGet();
-                    if (urlsProcessed % 200 == 0) {
-                        logger.info("Restarting driver after " + urlsProcessed + " URLs...");
-                        TwoPhaseNaukriScraper.cleanupThreadDriver();
                     }
                     
                 } catch (Exception e) {

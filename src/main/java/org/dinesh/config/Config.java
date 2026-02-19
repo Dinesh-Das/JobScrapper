@@ -41,6 +41,10 @@ public class Config {
         return Integer.parseInt(props.getProperty("db.leak.detection.threshold", "120000"));
     }
     
+    public static int getDbSubBatchSize() {
+        return Integer.parseInt(props.getProperty("db.sub.batch.size", "25"));
+    }
+    
     // Scraper
     public static int getScraperThreads() {
         return Integer.parseInt(props.getProperty("scraper.threads", "5"));
