@@ -338,18 +338,10 @@ public class BatchDatabaseHandler {
                 }
                 
                 try {
-                    // Create CLOBs using unwrapped connection
+                    // Create CLOB only for JobDescription (Education and KeySkills are now VARCHAR2)
                     CLOB jobDescClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
                     jobDescClob.setString(1, job.getJobDescription() != null ? job.getJobDescription() : "");
                     clobsToFree.add(jobDescClob);
-                    
-                    CLOB eduClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
-                    eduClob.setString(1, job.getEducation() != null ? job.getEducation() : "");
-                    clobsToFree.add(eduClob);
-                    
-                    CLOB skillsClob = CLOB.createTemporary(oracleConn, true, CLOB.DURATION_SESSION);
-                    skillsClob.setString(1, job.getKeySkills() != null ? job.getKeySkills() : "");
-                    clobsToFree.add(skillsClob);
                     
                     // Set parameters based on SQL type
                     if (useUpsert) {
@@ -371,8 +363,8 @@ public class BatchDatabaseHandler {
                         ps.setString(15, truncate(job.getDepartment(), 300));
                         ps.setString(16, truncate(job.getEmploymentType(), 300));
                         ps.setString(17, truncate(job.getRoleCategory(), 300));
-                        ps.setClob(18, eduClob);
-                        ps.setClob(19, skillsClob);
+                        ps.setString(18, truncate(job.getEducation(), 2000));
+                        ps.setString(19, truncate(job.getKeySkills(), 500));
                         
                         // MERGE parameters - INSERT clause
                         ps.setString(20, job.getUrl());
@@ -392,8 +384,8 @@ public class BatchDatabaseHandler {
                         ps.setString(34, truncate(job.getDepartment(), 300));
                         ps.setString(35, truncate(job.getEmploymentType(), 300));
                         ps.setString(36, truncate(job.getRoleCategory(), 300));
-                        ps.setClob(37, eduClob);
-                        ps.setClob(38, skillsClob);
+                        ps.setString(37, truncate(job.getEducation(), 2000));
+                        ps.setString(38, truncate(job.getKeySkills(), 500));
                     } else {
                         // INSERT parameters
                         ps.setString(1, job.getUrl());
@@ -413,8 +405,8 @@ public class BatchDatabaseHandler {
                         ps.setString(15, truncate(job.getDepartment(), 300));
                         ps.setString(16, truncate(job.getEmploymentType(), 300));
                         ps.setString(17, truncate(job.getRoleCategory(), 300));
-                        ps.setClob(18, eduClob);
-                        ps.setClob(19, skillsClob);
+                        ps.setString(18, truncate(job.getEducation(), 2000));
+                        ps.setString(19, truncate(job.getKeySkills(), 500));
                     }
                     
                     ps.addBatch();

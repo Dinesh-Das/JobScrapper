@@ -287,19 +287,37 @@ public class TwoPhaseNaukriScraper {
 
             driver.get(url);
 
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Config.getBrowserWaitTimeout()));
-
-            // Check for expired job message FIRST (before waiting for job details)
+            // CRITICAL: Check for expired job IMMEDIATELY (before any waiting)
+            // This saves 6+ seconds per expired job
             try {
-                WebElement expiredAlert = driver.findElement(By.cssSelector(".styles_exp-alert-message__nUbfX.styles_error__IhAVp"));
-                if (expiredAlert.isDisplayed()) {
-                    logger.info("Skipping expired job: " + url);
+                Thread.sleep(300); // Minimal delay for page to start loading
+                
+                // Check multiple expired job indicators quickly
+                try {
+                    WebElement expiredAlert = driver.findElement(By.cssSelector(".styles_exp-alert-message__nUbfX"));
+                    if (expiredAlert.isDisplayed()) {
+                        logger.fine("Skipping expired job (fast check - alert): " + url);
+                        MetricsTracker.incrementExpiredJobs();
+                        return;
+                    }
+                } catch (NoSuchElementException e) {
+                    // Try alternate expired indicator
+                }
+                
+                // Check page source for expired text (faster than element search)
+                String pageSource = driver.getPageSource();
+                if (pageSource.contains("Job you are looking for is <span>expired</span>") ||
+                    pageSource.contains("expired") && pageSource.contains("similar jobs below")) {
+                    logger.fine("Skipping expired job (fast check - source): " + url);
                     MetricsTracker.incrementExpiredJobs();
                     return;
                 }
-            } catch (NoSuchElementException e) {
-                // No expired message, continue normally
+            } catch (Exception e) {
+                // Continue normally if check fails
             }
+
+            // Reduced timeout for faster failure on expired/missing jobs
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(4));
 
             // Wait for job details page to load
             try {
@@ -310,7 +328,7 @@ public class TwoPhaseNaukriScraper {
                 try {
                     WebElement expiredAlert = driver.findElement(By.cssSelector(".styles_exp-alert-message__nUbfX"));
                     if (expiredAlert.isDisplayed()) {
-                        logger.info("Skipping expired job (detected after timeout): " + url);
+                        logger.fine("Skipping expired job (detected after timeout): " + url);
                         MetricsTracker.incrementExpiredJobs();
                         return;
                     }
@@ -326,14 +344,11 @@ public class TwoPhaseNaukriScraper {
                     throw new Exception("CAPTCHA detected - need to slow down");
                 }
                 
-                logger.warning("Timeout waiting for job details: " + url);
+                logger.fine("Timeout waiting for job details: " + url);
                 return;
             }
 
-            Thread.sleep(100); // Minimal delay for faster scraping
-            
-            // Add small random human-like delay (50-200ms)
-            Thread.sleep(50 + (long)(Math.random() * 150));
+            // Minimal delay for faster scraping (removed extra delays)
 
             // Extract job details
             JobListingEntity job = extractJobDetails(driver, url);
