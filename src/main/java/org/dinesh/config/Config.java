@@ -3,15 +3,17 @@ package org.dinesh.config;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.Properties;
+import java.util.logging.Logger;
 
 public class Config {
+    private static final Logger logger = Logger.getLogger(Config.class.getName());
     private static final Properties props = new Properties();
-    
+
     static {
         try (FileInputStream fis = new FileInputStream("config.properties")) {
             props.load(fis);
         } catch (IOException e) {
-            System.err.println("Failed to load config.properties: " + e.getMessage());
+            logger.severe("Failed to load config.properties: " + e.getMessage());
             throw new RuntimeException("Configuration file not found", e);
         }
     }
@@ -93,6 +95,22 @@ public class Config {
     public static int getCircuitBreakerThreshold() {
         return Integer.parseInt(props.getProperty("scraper.circuit.breaker.threshold", "5"));
     }
+
+    public static int getEmptyPageLimit() {
+        return Integer.parseInt(props.getProperty("scraper.empty.page.limit", "8"));
+    }
+
+    public static int getDriverRestartEvery() {
+        return Integer.parseInt(props.getProperty("scraper.driver.restart.every", "80"));
+    }
+
+    public static boolean isSkipPhase1() {
+        return Boolean.parseBoolean(props.getProperty("scraper.skip.phase1", "false"));
+    }
+
+    public static int getPageLoadTimeout() {
+        return Integer.parseInt(props.getProperty("browser.page.load.timeout", "25"));
+    }
     
     public static int getTabSwitchTimeout() {
         return Integer.parseInt(props.getProperty("browser.tab.switch.timeout", "10"));
@@ -113,5 +131,13 @@ public class Config {
     
     public static int getBrowserWaitTimeout() {
         return Integer.parseInt(props.getProperty("browser.wait.timeout", "10"));
+    }
+
+    public static boolean isCheckRobotsTxt() {
+        return Boolean.parseBoolean(props.getProperty("scraper.check.robots.txt", "true"));
+    }
+
+    public static boolean isRespectRobotsTxt() {
+        return Boolean.parseBoolean(props.getProperty("scraper.respect.robots.txt", "true"));
     }
 }

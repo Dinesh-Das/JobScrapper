@@ -1,59 +1,40 @@
-# Database Configuration
-# Copy this file to config.properties and update with your credentials
+# Database Configuration (unchanged ? pool size sufficient for low concurrency)
 db.url=jdbc:oracle:thin:@127.0.0.1:1521:XE
 db.user=system
 db.password=root
-db.pool.size=10
-db.connection.timeout=30000
-
-# Leak detection threshold (milliseconds) - how long before warning about held connections
-# Default: 120000 (2 minutes)
-db.leak.detection.threshold=120000
-
-# Sub-batch size for database operations - smaller batches = shorter connection hold time
-# Recommended: 20-30 for CLOB operations
+db.pool.size=20
+db.connection.timeout=60000
+db.leak.detection.threshold=300000
 db.sub.batch.size=25
 
-# Scraper Configuration
-# Reduce threads if getting rate-limited, increase for speed
+# Scraper Configuration - SLOW, STEALTH MODE
 scraper.threads=5
-scraper.total.pages=15
+scraper.total.pages=8000
 scraper.page.offset=1
-scraper.max.pages.per.thread=1000
-scraper.page.load.delay=500
-
-# Batch size: Higher = faster but more memory
-# Recommended: 25-100
-scraper.batch.size=50
-
-# Job search URL with {page} placeholder
+scraper.page.load.delay=2000
+scraper.batch.size=200
 scraper.job.search.url=https://www.naukri.com/software-developer-jobs-in-india-{page}
-
-# Retry configuration
-scraper.max.retries=3
+scraper.max.retries=5
 scraper.retry.delay=5000
-
-# Progress tracking
-scraper.progress.file=scraper_progress.txt
-
-# Duplicate detection (set to false for faster scraping)
 scraper.check.duplicates=true
-
-# Upsert duplicates (update existing records instead of skipping)
-# If true: duplicates will be updated with latest data
-# If false: duplicates will be skipped (faster)
 scraper.upsert.duplicates=false
-
-# Rate limiting delay (milliseconds between successful scrapes)
-scraper.rate.limit.delay=2000
-
-# Circuit breaker threshold (consecutive errors before stopping)
+scraper.rate.limit.delay=4000
 scraper.circuit.breaker.threshold=5
+# Stop Phase 1 after this many consecutive empty search pages
+scraper.empty.page.limit=8
+# Recycle the Chrome session every N pages/URLs per worker
+scraper.driver.restart.every=80
+# true = reuse urls_checkpoint.txt and skip collecting more pages
+scraper.skip.phase1=false
+# Warning-only by default; the scraper does not abort on robots.txt
+scraper.check.robots.txt=true
+scraper.respect.robots.txt=true
 
-# Browser Configuration
-# Enable headless for 30% speed boost
-browser.headless=false
-browser.disable.images=false
-browser.wait.timeout=10
-browser.tab.switch.timeout=10
-browser.click.delay=250
+# Browser Configuration - SLOW, STEALTH MODE
+browser.headless=true
+browser.disable.images=true
+browser.wait.timeout=30
+# Hard cap so driver.get() cannot hang forever
+browser.page.load.timeout=25
+browser.tab.switch.timeout=5
+browser.click.delay=200

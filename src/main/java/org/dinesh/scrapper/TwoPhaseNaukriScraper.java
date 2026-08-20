@@ -5,127 +5,147 @@ import org.dinesh.database.BatchDatabaseHandler;
 import org.dinesh.entity.JobListingEntity;
 import org.dinesh.process.ChromeDriverManager;
 import org.dinesh.util.MetricsTracker;
-import org.openqa.selenium.*;
+import org.openqa.selenium.By;
+import org.openqa.selenium.JavascriptExecutor;
 import org.openqa.selenium.NoSuchElementException;
-import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.NoSuchSessionException;
+import org.openqa.selenium.PageLoadStrategy;
+import org.openqa.selenium.SessionNotCreatedException;
+import org.openqa.selenium.TimeoutException;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebDriverException;
+import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeOptions;
 import org.openqa.selenium.support.ui.ExpectedConditions;
 import org.openqa.selenium.support.ui.WebDriverWait;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 /**
- * Two-Phase Scraper: 
+ * Two-Phase Scraper:
  * Phase 1: Collect all URLs from search pages (fast)
  * Phase 2: Scrape job details for unique URLs (no redundant work)
  */
 public class TwoPhaseNaukriScraper {
     private static final Logger logger = Logger.getLogger(TwoPhaseNaukriScraper.class.getName());
 
-    private final List<JobListingEntity> jobBatch = new ArrayList<>();
+    private static final By[] JOB_CARD_SELECTORS = new By[] {
+            By.cssSelector("[class*='cust-job-tuple']"),
+            By.cssSelector("[class*='srp-jobtuple']"),
+            By.cssSelector("a.title"),
+            By.cssSelector("a[href*='job-listings']"),
+            By.cssSelector("[data-type='job']"),
+            By.cssSelector("article"),
+            By.cssSelector(".job-card")
+    };
+
+    private static final By[] TITLE_SELECTORS = new By[] {
+            By.cssSelector("[class*='jd-header-title']"),
+            By.cssSelector("h1"),
+            By.cssSelector("[data-type='job-title']"),
+            By.cssSelector(".job-title"),
+            By.xpath("//h1[contains(@class, 'title')]")
+    };
+
+    private static final By[] EXPIRED_SELECTORS = new By[] {
+            By.cssSelector("[class*='exp-alert-message']"),
+            By.cssSelector("[class*='expired']"),
+            By.cssSelector(".exp-alert"),
+            By.cssSelector("[data-type='expired-job']"),
+            By.xpath("//*[contains(text(), 'expired') and contains(text(), 'job')]")
+    };
+
+    private final List<JobListingEntity> jobBatch = new ArrayList<JobListingEntity>();
     private final int batchSize;
 
-    // ThreadLocal driver for reuse within same thread (PERFORMANCE FIX)
-    private static final ThreadLocal<WebDriver> threadDriver = new ThreadLocal<>();
+    private static final ThreadLocal<WebDriver> threadDriver = new ThreadLocal<WebDriver>();
     private static final Set<WebDriver> allDrivers = ConcurrentHashMap.newKeySet();
 
     public TwoPhaseNaukriScraper() {
         this.batchSize = Config.getBatchSize();
     }
 
-    /**
-     * Get or create WebDriver for current thread (reuses driver for performance)
-     */
     private WebDriver getThreadDriver() {
         WebDriver driver = threadDriver.get();
-        
-        // Check if driver exists and session is still valid
+
         if (driver != null) {
             try {
-                // Test if session is still alive
                 driver.getTitle();
-                // Session is valid, reuse it
-            } catch (org.openqa.selenium.NoSuchSessionException e) {
-                // Session explicitly invalid
-                logger.warning(Thread.currentThread().getName() + ": Session invalid (NoSuchSessionException), recreating driver");
+            } catch (NoSuchSessionException e) {
+                logger.warning(Thread.currentThread().getName() + ": Session invalid, recreating driver");
                 cleanupAndRemoveDriver(driver);
                 driver = null;
-            } catch (org.openqa.selenium.WebDriverException e) {
-                // Generic WebDriver error - session likely dead
-                logger.warning(Thread.currentThread().getName() + ": WebDriver error (" + e.getClass().getSimpleName() + "), recreating driver: " + e.getMessage());
+            } catch (WebDriverException e) {
+                logger.warning(Thread.currentThread().getName() + ": WebDriver error ("
+                        + e.getClass().getSimpleName() + "), recreating driver");
                 cleanupAndRemoveDriver(driver);
                 driver = null;
             } catch (Exception e) {
-                // Unexpected error
-                logger.warning(Thread.currentThread().getName() + ": Unexpected error checking session, recreating driver: " + e.getMessage());
+                logger.warning(Thread.currentThread().getName() + ": Unexpected session error, recreating driver: "
+                        + e.getMessage());
                 cleanupAndRemoveDriver(driver);
                 driver = null;
             }
         }
-        
+
         if (driver == null) {
             logger.info(Thread.currentThread().getName() + ": Creating new driver");
-            ChromeOptions options = buildChromeOptions();
-            driver = ChromeDriverManager.createDriver(options);
-            
-            // Execute stealth JavaScript to hide automation
+            driver = ChromeDriverManager.createDriver(buildChromeOptions());
             executeStealthScript(driver);
-            
             threadDriver.set(driver);
             allDrivers.add(driver);
         }
         return driver;
     }
-    
-    /**
-     * Execute JavaScript to hide WebDriver detection
-     */
+
     private void executeStealthScript(WebDriver driver) {
         try {
             JavascriptExecutor js = (JavascriptExecutor) driver;
-            
-            // Override navigator.webdriver
             js.executeScript(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-            );
-            
-            // Override chrome detection
-            js.executeScript(
-                "window.navigator.chrome = {runtime: {}};"
-            );
-            
-            // Override permissions
-            js.executeScript(
-                "const originalQuery = window.navigator.permissions.query;" +
-                "window.navigator.permissions.query = (parameters) => (" +
-                "  parameters.name === 'notifications' ?" +
-                "    Promise.resolve({ state: Notification.permission }) :" +
-                "    originalQuery(parameters)" +
-                ");"
-            );
-            
-            // Override plugins
-            js.executeScript(
-                "Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});"
-            );
-            
-            // Override languages
-            js.executeScript(
-                "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});"
-            );
-            
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+                            + "window.navigator.chrome = {runtime: {}};"
+                            + "Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});"
+                            + "Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});");
         } catch (Exception e) {
             logger.fine("Could not execute stealth script: " + e.getMessage());
         }
     }
-    
-    /**
-     * Helper to cleanup and remove driver from tracking
-     */
+
+    private void dismissOverlays(WebDriver driver) {
+        try {
+            JavascriptExecutor js = (JavascriptExecutor) driver;
+            js.executeScript(
+                    "var sels = ['#onetrust-accept-btn-handler','.accept-cookies',"
+                            + "'button[id*=\"accept\"]','.crossIcon','#close-popup'];"
+                            + "for (var i = 0; i < sels.length; i++) {"
+                            + "  var el = document.querySelector(sels[i]);"
+                            + "  if (el) { try { el.click(); } catch (e) {} }"
+                            + "}");
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void safeGet(WebDriver driver, String url) {
+        try {
+            driver.get(url);
+        } catch (TimeoutException e) {
+            // EAGER + pageLoadTimeout: DOM is usually usable even when this fires
+            logger.fine("Page load timeout (continuing): " + url);
+        } catch (Exception e) {
+            logger.warning("Unexpected error loading page " + url + ": " + e.getMessage());
+            throw new RuntimeException("Failed to load page: " + url, e);
+        }
+    }
+
     private void cleanupAndRemoveDriver(WebDriver driver) {
         try {
             ChromeDriverManager.cleanupDriver(driver);
@@ -136,9 +156,6 @@ public class TwoPhaseNaukriScraper {
         threadDriver.remove();
     }
 
-    /**
-     * Cleanup thread-local driver (call at end of thread execution)
-     */
     public static void cleanupThreadDriver() {
         WebDriver driver = threadDriver.get();
         if (driver != null) {
@@ -150,10 +167,7 @@ public class TwoPhaseNaukriScraper {
             }
         }
     }
-    
-    /**
-     * Cleanup all thread drivers (call after executor shutdown)
-     */
+
     public static void cleanupAllThreadDrivers() {
         logger.info("Cleaning up " + allDrivers.size() + " thread drivers");
         for (WebDriver driver : allDrivers) {
@@ -166,270 +180,417 @@ public class TwoPhaseNaukriScraper {
         allDrivers.clear();
     }
 
-    /**
-     * PHASE 1: Collect job URLs from a search result page (lightweight, no tab opening)
-     */
     public Set<String> collectUrlsFromPage(int pageNo) throws Exception {
-        int maxRetries = 2;
+        int maxRetries = Math.max(1, Config.getMaxRetries());
         Exception lastException = null;
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 return collectUrlsFromPageInternal(pageNo);
-            } catch (org.openqa.selenium.TimeoutException e) {
+            } catch (TimeoutException e) {
                 lastException = e;
-                logger.warning("Attempt " + attempt + " failed for page " + pageNo + ": Timeout - browser may be stuck");
-                
-                // If timeout, restart the driver for this thread (browser is likely stuck)
+                logger.warning("Attempt " + attempt + " failed for page " + pageNo + ": Timeout");
                 if (attempt < maxRetries) {
-                    logger.info("Restarting stuck browser for page " + pageNo);
                     cleanupThreadDriver();
-                    Thread.sleep(2000);
+                    Thread.sleep(Config.getRetryDelay());
+                }
+            } catch (SessionNotCreatedException e) {
+                lastException = e;
+                logger.warning("Attempt " + attempt + " failed for page " + pageNo + ": session not created");
+                cleanupThreadDriver();
+                if (attempt < maxRetries) {
+                    Thread.sleep(Config.getRetryDelay() * attempt);
                 }
             } catch (Exception e) {
                 lastException = e;
                 logger.warning("Attempt " + attempt + " failed for page " + pageNo + ": " + e.getMessage());
                 if (attempt < maxRetries) {
-                    Thread.sleep(2000 * attempt);
+                    Thread.sleep(Config.getRetryDelay() * attempt);
                 }
             }
         }
 
-        throw new Exception("Failed to collect URLs from page " + pageNo + " after " + maxRetries + " attempts", lastException);
+        throw new Exception("Failed to collect URLs from page " + pageNo + " after " + maxRetries + " attempts",
+                lastException);
     }
 
     private Set<String> collectUrlsFromPageInternal(int pageNo) throws Exception {
-        Set<String> urls = new HashSet<>();
-
+        Set<String> urls = new HashSet<String>();
+        String searchUrl = Config.getJobSearchUrl().replace("{page}", String.valueOf(pageNo));
         try {
-            // Use thread-local driver for performance
-            // getThreadDriver() will automatically detect and recreate invalid sessions
             WebDriver driver = getThreadDriver();
-
-            // Build search URL - replace {page} placeholder with actual page number
-            String searchUrl = Config.getJobSearchUrl().replace("{page}", String.valueOf(pageNo));
-            driver.get(searchUrl);
+            safeGet(driver, searchUrl);
+            dismissOverlays(driver);
 
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Config.getBrowserWaitTimeout()));
-
-            // Wait for job listings to load (increased timeout for heavy load)
-            wait.until(ExpectedConditions.presenceOfElementLocated(
-                By.cssSelector(".cust-job-tuple.layout-wrapper.lay-2.sjw__tuple")));
-
-            Thread.sleep(200); // Minimal delay for dynamic content
-
-            // Extract all job URLs from the page
-            List<WebElement> jobCards = driver.findElements(
-                By.cssSelector(".cust-job-tuple.layout-wrapper.lay-2.sjw__tuple"));
-
-            for (WebElement card : jobCards) {
-                try {
-                    WebElement titleLink = card.findElement(By.cssSelector("a.title"));
-                    String url = titleLink.getAttribute("href");
-                    if (url != null && !url.isEmpty()) {
-                        urls.add(url);
-                    }
-                } catch (NoSuchElementException e) {
-                    // Skip cards without title link
+            try {
+                wait.until(ExpectedConditions.or(
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='cust-job-tuple']")),
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("[class*='srp-jobtuple']")),
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("a.title")),
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("a[href*='job-listings']")),
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("[data-type='job']")),
+                        ExpectedConditions.presenceOfElementLocated(By.cssSelector("article"))
+                ));
+            } catch (TimeoutException e) {
+                if (detectCaptcha(driver)) {
+                    logger.severe("CAPTCHA on search page " + pageNo + " — backing off 45s");
+                    Thread.sleep(45000);
+                    throw e;
                 }
+                // Check if page has any content before treating as empty
+                String pageSource = driver.getPageSource();
+                if (pageSource != null && pageSource.length() < 5000) {
+                    logger.warning("Page " + pageNo + " appears to be empty or error page (length: " + pageSource.length() + ")");
+                    throw new Exception("Page appears to be empty or error page");
+                }
+                logger.fine("Listing wait timed out on page " + pageNo + ", extracting whatever is present");
+            }
+
+            int settle = Math.max(100, Config.getPageLoadDelay());
+            Thread.sleep(settle);
+
+            urls.addAll(extractUrlsViaJs(driver));
+            if (urls.isEmpty()) {
+                urls.addAll(extractUrlsViaCss(driver));
             }
 
             logger.info("Page " + pageNo + ": Found " + urls.size() + " job URLs");
-            
-            // Rate limiting with random jitter to avoid detection
+
             long baseDelay = Config.getRateLimitDelay();
-            long jitter = (long)(Math.random() * 500); // 0-500ms random
+            long jitter = (long) (Math.random() * 400);
             Thread.sleep(baseDelay + jitter);
-            
             return urls;
 
-        } catch (org.openqa.selenium.SessionNotCreatedException | 
-                 org.openqa.selenium.NoSuchSessionException e) {
-            // Session is dead, force cleanup and retry will recreate
+        } catch (SessionNotCreatedException e) {
+            logger.warning("Session error for page " + pageNo + ", will recreate on retry: " + e.getMessage());
+            cleanupThreadDriver();
+            throw e;
+        } catch (NoSuchSessionException e) {
             logger.warning("Session error for page " + pageNo + ", will recreate on retry: " + e.getMessage());
             cleanupThreadDriver();
             throw e;
         } catch (Exception e) {
-            logger.severe("Error collecting URLs from page " + pageNo + ": " + e.getMessage());
+            logger.severe("Error collecting URLs from page " + pageNo + " (URL: " + searchUrl + "): " + e.getMessage());
+            logger.severe("Exception type: " + e.getClass().getName());
             throw e;
         }
-        // Note: Don't cleanup driver here - it's reused by thread
     }
 
-    /**
-     * PHASE 2: Scrape job details from a specific URL
-     */
+    @SuppressWarnings("unchecked")
+    private Set<String> extractUrlsViaJs(WebDriver driver) {
+        Set<String> urls = new HashSet<String>();
+        try {
+            JavascriptExecutor js = (JavascriptExecutor) driver;
+            Object raw = js.executeScript(
+                    "var out = []; var seen = {};"
+                            + "var nodes = document.querySelectorAll('a.title[href], a[href*=\"job-listings\"]');"
+                            + "for (var i = 0; i < nodes.length; i++) {"
+                            + "  var h = nodes[i].href;"
+                            + "  if (h && h.indexOf('job-listings') !== -1 && !seen[h]) { seen[h] = 1; out.push(h); }"
+                            + "}"
+                            + "return out;");
+            if (raw instanceof List) {
+                List<?> list = (List<?>) raw;
+                for (Object item : list) {
+                    if (item != null) {
+                        String href = String.valueOf(item).trim();
+                        if (!href.isEmpty()) {
+                            urls.add(href);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            logger.fine("JS URL extract failed: " + e.getMessage());
+        }
+        return urls;
+    }
+
+    private Set<String> extractUrlsViaCss(WebDriver driver) {
+        Set<String> urls = new HashSet<String>();
+        for (By cardSel : JOB_CARD_SELECTORS) {
+            List<WebElement> nodes = driver.findElements(cardSel);
+            for (WebElement node : nodes) {
+                try {
+                    String href = node.getAttribute("href");
+                    if (href == null || href.isEmpty()) {
+                        List<WebElement> links = node.findElements(By.cssSelector("a.title, a[href*='job-listings']"));
+                        if (!links.isEmpty()) {
+                            href = links.get(0).getAttribute("href");
+                        }
+                    }
+                    if (href != null && href.contains("job-listings")) {
+                        urls.add(href);
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            if (!urls.isEmpty()) {
+                break;
+            }
+        }
+        return urls;
+    }
+
     public void scrapeJobDetails(String url) throws Exception {
-        int maxRetries = 2;
+        int maxRetries = Math.max(1, Config.getMaxRetries());
         Exception lastException = null;
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 scrapeJobDetailsInternal(url);
-                return; // Success
+                return;
             } catch (Exception e) {
                 lastException = e;
                 if (attempt < maxRetries) {
-                    Thread.sleep(1000 * attempt);
+                    Thread.sleep(Config.getRetryDelay() * attempt);
                 }
             }
         }
 
-        logger.warning("Failed to scrape job details for " + url + " after " + maxRetries + " attempts");
+        logger.warning("Failed to scrape job details for " + url + " after " + maxRetries + " attempts"
+                + (lastException != null ? ": " + lastException.getMessage() : ""));
         MetricsTracker.incrementErrors();
     }
 
     private void scrapeJobDetailsInternal(String url) throws Exception {
         try {
-            // Use thread-local driver for performance (REUSE instead of creating new)
-            // getThreadDriver() will automatically detect and recreate invalid sessions
             WebDriver driver = getThreadDriver();
+            safeGet(driver, url);
+            dismissOverlays(driver);
+            Thread.sleep(Math.max(150, Config.getPageLoadDelay()));
 
-            driver.get(url);
+            // Add rate limiting before processing
+            long baseDelay = Config.getRateLimitDelay();
+            long jitter = (long) (Math.random() * 1000);
+            Thread.sleep(baseDelay + jitter);
 
-            // CRITICAL: Check for expired job IMMEDIATELY (before any waiting)
-            // This saves 6+ seconds per expired job
-            try {
-                Thread.sleep(300); // Minimal delay for page to start loading
-                
-                // Check multiple expired job indicators quickly
-                try {
-                    WebElement expiredAlert = driver.findElement(By.cssSelector(".styles_exp-alert-message__nUbfX"));
-                    if (expiredAlert.isDisplayed()) {
-                        logger.fine("Skipping expired job (fast check - alert): " + url);
-                        MetricsTracker.incrementExpiredJobs();
-                        return;
-                    }
-                } catch (NoSuchElementException e) {
-                    // Try alternate expired indicator
-                }
-                
-                // Check page source for expired text (faster than element search)
-                String pageSource = driver.getPageSource();
-                if (pageSource.contains("Job you are looking for is <span>expired</span>") ||
-                    pageSource.contains("expired") && pageSource.contains("similar jobs below")) {
-                    logger.fine("Skipping expired job (fast check - source): " + url);
-                    MetricsTracker.incrementExpiredJobs();
-                    return;
-                }
-            } catch (Exception e) {
-                // Continue normally if check fails
-            }
-
-            // Reduced timeout for faster failure on expired/missing jobs
-            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(4));
-
-            // Wait for job details page to load
-            try {
-                wait.until(ExpectedConditions.visibilityOfElementLocated(
-                    By.cssSelector(".styles_jd-header-title__rZwM1")));
-            } catch (Exception e) {
-                // Double-check if it's an expired job (sometimes loads slowly)
-                try {
-                    WebElement expiredAlert = driver.findElement(By.cssSelector(".styles_exp-alert-message__nUbfX"));
-                    if (expiredAlert.isDisplayed()) {
-                        logger.fine("Skipping expired job (detected after timeout): " + url);
-                        MetricsTracker.incrementExpiredJobs();
-                        return;
-                    }
-                } catch (NoSuchElementException ex) {
-                    // Not expired, just timeout
-                }
-                
-                // Check for CAPTCHA only on timeout (not on every page)
-                if (detectCaptcha(driver)) {
-                    logger.severe("CAPTCHA DETECTED! URL: " + url);
-                    logger.severe("Pausing for 60 seconds...");
-                    Thread.sleep(60000);
-                    throw new Exception("CAPTCHA detected - need to slow down");
-                }
-                
-                logger.fine("Timeout waiting for job details: " + url);
+            if (isExpiredJob(driver)) {
+                logger.fine("Skipping expired job: " + url);
+                MetricsTracker.incrementExpiredJobs();
                 return;
             }
 
-            // Minimal delay for faster scraping (removed extra delays)
+            WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Math.max(4, Config.getBrowserWaitTimeout() / 2)));
+            boolean titleReady = false;
+            try {
+                wait.until(ExpectedConditions.or(
+                        ExpectedConditions.visibilityOfElementLocated(By.cssSelector("[class*='jd-header-title']")),
+                        ExpectedConditions.visibilityOfElementLocated(By.cssSelector("h1"))
+                ));
+                titleReady = true;
+            } catch (Exception e) {
+                if (isExpiredJob(driver)) {
+                    logger.fine("Skipping expired job (after wait): " + url);
+                    MetricsTracker.incrementExpiredJobs();
+                    return;
+                }
+                if (detectCaptcha(driver)) {
+                    logger.severe("CAPTCHA DETECTED! URL: " + url);
+                    logger.severe("Pausing for 45 seconds...");
+                    Thread.sleep(45000);
+                    throw new Exception("CAPTCHA detected - need to slow down");
+                }
+            }
 
-            // Extract job details
-            JobListingEntity job = extractJobDetails(driver, url);
+            JobListingEntity job = extractJobDetailsViaJs(driver, url);
+            if (job == null || !isValidJob(job)) {
+                job = extractJobDetails(driver, url);
+            }
 
             if (job != null && isValidJob(job)) {
                 addToBatch(job);
+            } else if (!titleReady) {
+                logger.fine("No job details extracted: " + url);
             }
 
-        } catch (org.openqa.selenium.SessionNotCreatedException | 
-                 org.openqa.selenium.NoSuchSessionException e) {
-            // Session is dead, force cleanup and retry will recreate
+            // Add rate limiting after processing
+            long postDelay = Config.getRateLimitDelay() / 2;
+            long postJitter = (long) (Math.random() * 500);
+            Thread.sleep(postDelay + postJitter);
+
+        } catch (SessionNotCreatedException e) {
+            logger.warning("Session error for " + url + ", will recreate on retry: " + e.getMessage());
+            cleanupThreadDriver();
+            throw e;
+        } catch (NoSuchSessionException e) {
             logger.warning("Session error for " + url + ", will recreate on retry: " + e.getMessage());
             cleanupThreadDriver();
             throw e;
         } catch (Exception e) {
             logger.warning("Error scraping job details for " + url + ": " + e.getMessage());
+            logger.warning("Exception type: " + e.getClass().getName());
             throw e;
         }
-        // Note: Don't cleanup driver here - it's reused by thread
     }
-    
-    /**
-     * Detect if CAPTCHA is present on the page
-     * Uses specific selectors to avoid false positives
-     */
+
+    private boolean isExpiredJob(WebDriver driver) {
+        try {
+            for (By sel : EXPIRED_SELECTORS) {
+                List<WebElement> alerts = driver.findElements(sel);
+                for (WebElement alert : alerts) {
+                    try {
+                        if (alert.isDisplayed()) {
+                            String text = alert.getText();
+                            if (text != null && text.toLowerCase().contains("expired")) {
+                                return true;
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+            String source = driver.getPageSource();
+            if (source == null) {
+                return false;
+            }
+            String lower = source.toLowerCase();
+            return lower.contains("job you are looking for is") && lower.contains("expired")
+                    || (lower.contains("expired") && lower.contains("similar jobs below"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     private boolean detectCaptcha(WebDriver driver) {
         try {
-            // Method 1: Check for actual reCAPTCHA iframe
             try {
                 WebElement captchaFrame = driver.findElement(By.cssSelector("iframe[src*='recaptcha']"));
                 if (captchaFrame.isDisplayed()) {
                     logger.info("CAPTCHA detected: reCAPTCHA iframe found");
                     return true;
                 }
-            } catch (NoSuchElementException e) {
-                // No reCAPTCHA iframe
+            } catch (NoSuchElementException ignored) {
             }
-            
-            // Method 2: Check for CAPTCHA challenge page (title contains "captcha" or "verify")
-            String title = driver.getTitle().toLowerCase();
-            if (title.contains("captcha") || title.contains("verify you") || title.contains("robot")) {
-                logger.info("CAPTCHA detected: Page title indicates CAPTCHA - " + title);
-                return true;
+
+            String title = driver.getTitle();
+            if (title != null) {
+                String lower = title.toLowerCase();
+                if (lower.contains("captcha") || lower.contains("verify you") || lower.contains("robot")) {
+                    logger.info("CAPTCHA detected: Page title indicates CAPTCHA - " + title);
+                    return true;
+                }
             }
-            
-            // Method 3: Check for specific CAPTCHA container elements
+
             try {
                 WebElement captchaContainer = driver.findElement(By.id("captcha-container"));
                 if (captchaContainer.isDisplayed()) {
                     logger.info("CAPTCHA detected: CAPTCHA container found");
                     return true;
                 }
-            } catch (NoSuchElementException e) {
-                // No CAPTCHA container
+            } catch (NoSuchElementException ignored) {
             }
-            
-            // Method 4: Check for "Access Denied" or "Too Many Requests" pages
-            String pageSource = driver.getPageSource().toLowerCase();
-            if ((pageSource.contains("access denied") || pageSource.contains("too many requests")) 
-                && pageSource.length() < 5000) { // Short page = likely error page
-                logger.info("CAPTCHA detected: Access denied or rate limit page");
-                return true;
+
+            String pageSource = driver.getPageSource();
+            if (pageSource != null) {
+                String lower = pageSource.toLowerCase();
+                if ((lower.contains("access denied") || lower.contains("too many requests"))
+                        && pageSource.length() < 5000) {
+                    logger.info("CAPTCHA detected: Access denied or rate limit page");
+                    return true;
+                }
             }
-            
             return false;
         } catch (Exception e) {
             return false;
         }
     }
 
-    /**
-     * Thread-safe method to add job to batch
-     */
     private synchronized void addToBatch(JobListingEntity job) {
         jobBatch.add(job);
         MetricsTracker.incrementJobsScraped(1);
-
-        // Flush batch when it reaches size limit
         if (jobBatch.size() >= batchSize) {
             flushBatch();
         }
+    }
+
+    @SuppressWarnings("unchecked")
+    private JobListingEntity extractJobDetailsViaJs(WebDriver driver, String url) {
+        try {
+            JavascriptExecutor js = (JavascriptExecutor) driver;
+            Object raw = js.executeScript(
+                    "function pick(root, sels) {"
+                            + "  for (var i = 0; i < sels.length; i++) {"
+                            + "    var el = document.querySelector(sels[i]);"
+                            + "    if (el && el.innerText && el.innerText.trim()) return el.innerText.trim();"
+                            + "  }"
+                            + "  return '';"
+                            + "}"
+                            + "function byLabel(label) {"
+                            + "  var nodes = document.querySelectorAll('div,span,label');"
+                            + "  for (var i = 0; i < nodes.length; i++) {"
+                            + "    var t = (nodes[i].childNodes[0] && nodes[i].childNodes[0].textContent || nodes[i].textContent || '').trim();"
+                            + "    if (t === label || t === label + ':') {"
+                            + "      var sib = nodes[i].nextElementSibling;"
+                            + "      if (sib && sib.innerText) return sib.innerText.trim();"
+                            + "      var parent = nodes[i].parentElement;"
+                            + "      if (parent) {"
+                            + "        var val = parent.querySelector('[class*=\"value\"], [class*=\"item__value\"]');"
+                            + "        if (val && val.innerText) return val.innerText.trim();"
+                            + "      }"
+                            + "    }"
+                            + "  }"
+                            + "  return '';"
+                            + "}"
+                            + "var data = {};"
+                            + "data.title = pick(document, ['[class*=\"jd-header-title\"]','h1','[data-type=\"job-title\"]','.job-title']);"
+                            + "data.companyName = pick(document, ['[class*=\"jd-header-comp-name\"]','[class*=\"comp-name\"]','.company-name']);"
+                            + "data.experience = pick(document, ['span[class*=\"exp\"] .ellipsis','[class*=\"expwdth\"]','[class*=\"exp\"]','.experience']);"
+                            + "data.salary = pick(document, ['span[class*=\"salary\"] .ellipsis','[class*=\"sal\"]','.salary']);"
+                            + "data.location = pick(document, ['span[class*=\"loc\"] .ellipsis','[class*=\"locWdth\"]','[class*=\"loc\"]','.location']);"
+                            + "data.posted = pick(document, ['[class*=\"posted-date\"]','[class*=\"stat\"]','.posted-date']);"
+                            + "data.openings = pick(document, ['[class*=\"jhc__opening\"]','.openings']);"
+                            + "data.applications = pick(document, ['[class*=\"jhc__applications\"]','.applications']);"
+                            + "data.jobDescription = pick(document, ['[class*=\"dang-inner-html\"]','[class*=\"job-desc\"]','[class*=\"JDC\"]','.job-description']);"
+                            + "data.role = byLabel('Role') || pick(document, ['[class*=\"jhc__item__value\"]','.role']);"
+                            + "data.industryType = byLabel('Industry Type') || pick(document, ['.industry-type']);"
+                            + "data.department = byLabel('Department') || pick(document, ['.department']);"
+                            + "data.employmentType = byLabel('Employment Type') || pick(document, ['.employment-type']);"
+                            + "data.roleCategory = byLabel('Role Category') || pick(document, ['.role-category']);"
+                            + "data.education = byLabel('Education') || pick(document, ['.education']);"
+                            + "data.keySkills = pick(document, ['[class*=\"jhc__skills\"]','[class*=\"key-skill\"]','[class*=\"skills\"]','.skills']);"
+                            + "data.rating = pick(document, ['[class*=\"jd-header-comp-name\"] .main-2','[class*=\"rating\"]','.rating']);"
+                            + "data.reviews = pick(document, ['[class*=\"jd-header-comp-name\"] a.review','a.review']);"
+                            + "return data;");
+            if (!(raw instanceof Map)) {
+                return null;
+            }
+            Map<String, Object> data = (Map<String, Object>) raw;
+            String title = str(data.get("title"));
+            if (title.isEmpty()) {
+                return null;
+            }
+            JobListingEntity job = new JobListingEntity();
+            job.setUrl(url);
+            job.setTitle(title);
+            job.setCompanyName(cleanCompanyName(str(data.get("companyName"))));
+            job.setRating(str(data.get("rating")));
+            job.setReviews(str(data.get("reviews")));
+            job.setExperience(str(data.get("experience")));
+            job.setSalary(str(data.get("salary")));
+            job.setLocation(str(data.get("location")));
+            job.setPosted(parsePosted(str(data.get("posted"))));
+            job.setOpenings(parseOpenings(str(data.get("openings"))));
+            job.setApplications(parseApplications(str(data.get("applications"))));
+            job.setJobDescription(str(data.get("jobDescription")));
+            job.setRole(str(data.get("role")));
+            job.setIndustryType(str(data.get("industryType")));
+            job.setDepartment(str(data.get("department")));
+            job.setEmploymentType(str(data.get("employmentType")));
+            job.setRoleCategory(str(data.get("roleCategory")));
+            job.setEducation(str(data.get("education")));
+            job.setKeySkills(str(data.get("keySkills")));
+            job.setLogdate(String.valueOf(LocalDateTime.now()));
+            return job;
+        } catch (Exception e) {
+            logger.fine("JS job extract failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    private static String str(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
     }
 
     private JobListingEntity extractJobDetails(WebDriver driver, String url) {
@@ -437,84 +598,73 @@ public class TwoPhaseNaukriScraper {
         job.setUrl(url);
 
         try {
-            // Title
-            String title = safeGetText(driver, By.cssSelector(".styles_jd-header-title__rZwM1"));
-            job.setTitle(title);
+            job.setTitle(firstText(driver, TITLE_SELECTORS));
+            if (job.getTitle() == null || job.getTitle().isEmpty()) {
+                logger.fine("No title found for: " + url);
+                return null;
+            }
 
-            // Company Name
-            String companyName = safeGetText(driver, By.cssSelector(".styles_jd-header-comp-name__MvqAI"));
-            job.setCompanyName(cleanCompanyName(companyName));
-
-            // Rating
-            String rating = safeGetText(driver, By.cssSelector(".styles_jd-header-comp-name__MvqAI .main-2"));
-            job.setRating(rating);
-
-            // Reviews
-            String reviews = safeGetText(driver, By.cssSelector(".styles_jd-header-comp-name__MvqAI a.review"));
-            job.setReviews(reviews);
-
-            // Experience
-            String experience = safeGetText(driver, By.xpath("//span[contains(@class, 'exp')]/span[@class='ellipsis']"));
-            job.setExperience(experience);
-
-            // Salary
-            String salary = safeGetText(driver, By.xpath("//span[contains(@class, 'salary')]/span[@class='ellipsis']"));
-            job.setSalary(salary);
-
-            // Location
-            String location = safeGetText(driver, By.xpath("//span[contains(@class, 'loc')]/span[@class='ellipsis']"));
-            job.setLocation(location);
-
-            // Posted date
-            String posted = safeGetText(driver, By.cssSelector(".styles_jhc__posted-date__rNYoJ"));
-            job.setPosted(parsePosted(posted));
-
-            // Openings
-            String openings = safeGetText(driver, By.cssSelector(".styles_jhc__opening__SmFbh"));
-            job.setOpenings(parseOpenings(openings));
-
-            // Applications
-            String applications = safeGetText(driver, By.cssSelector(".styles_jhc__applications__fDIHN"));
-            job.setApplications(parseApplications(applications));
-
-            // Job Description
-            String jobDescription = safeGetText(driver, By.cssSelector(".styles_JDC__dang-inner-html__h0K4t"));
-            job.setJobDescription(jobDescription);
-
-            // Role
-            String role = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrg' and preceding-sibling::div[contains(text(), 'Role')]]"));
-            job.setRole(role);
-
-            // Industry Type
-            String industryType = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrg' and preceding-sibling::div[contains(text(), 'Industry Type')]]"));
-            job.setIndustryType(industryType);
-
-            // Department
-            String department = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrg' and preceding-sibling::div[contains(text(), 'Department')]]"));
-            job.setDepartment(department);
-
-            // Employment Type
-            String employmentType = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrg' and preceding-sibling::div[contains(text(), 'Employment Type')]]"));
-            job.setEmploymentType(employmentType);
-
-            // Role Category
-            String roleCategory = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrrg' and preceding-sibling::div[contains(text(), 'Role Category')]]"));
-            job.setRoleCategory(roleCategory);
-
-            // Education
-            String education = safeGetText(driver, By.xpath("//div[@class='styles_jhc__item__value__xrRrg' and preceding-sibling::div[contains(text(), 'Education')]]"));
-            job.setEducation(education);
-
-            // Key Skills
-            String keySkills = safeGetText(driver, By.cssSelector(".styles_jhc__skills__KKLjd"));
-            job.setKeySkills(keySkills);
-
+            job.setCompanyName(cleanCompanyName(firstText(driver,
+                    By.cssSelector("[class*='jd-header-comp-name']"),
+                    By.cssSelector("[class*='comp-name']"),
+                    By.cssSelector(".company-name"))));
+            job.setRating(firstText(driver,
+                    By.cssSelector("[class*='jd-header-comp-name'] .main-2"),
+                    By.cssSelector(".rating")));
+            job.setReviews(firstText(driver,
+                    By.cssSelector("[class*='jd-header-comp-name'] a.review"),
+                    By.cssSelector("a.review")));
+            job.setExperience(firstText(driver,
+                    By.xpath("//span[contains(@class, 'exp')]/span[@class='ellipsis']"),
+                    By.cssSelector("[class*='expwdth']"),
+                    By.cssSelector(".experience")));
+            job.setSalary(firstText(driver,
+                    By.xpath("//span[contains(@class, 'salary')]/span[@class='ellipsis']"),
+                    By.cssSelector("[class*='sal']"),
+                    By.cssSelector(".salary")));
+            job.setLocation(firstText(driver,
+                    By.xpath("//span[contains(@class, 'loc')]/span[@class='ellipsis']"),
+                    By.cssSelector("[class*='locWdth']"),
+                    By.cssSelector(".location")));
+            job.setPosted(parsePosted(firstText(driver,
+                    By.cssSelector("[class*='posted-date']"),
+                    By.cssSelector(".posted-date"))));
+            job.setOpenings(parseOpenings(firstText(driver,
+                    By.cssSelector("[class*='jhc__opening']"),
+                    By.cssSelector(".openings"))));
+            job.setApplications(parseApplications(firstText(driver,
+                    By.cssSelector("[class*='jhc__applications']"),
+                    By.cssSelector(".applications"))));
+            job.setJobDescription(firstText(driver,
+                    By.cssSelector("[class*='dang-inner-html']"),
+                    By.cssSelector("[class*='job-desc']"),
+                    By.cssSelector(".job-description")));
+            job.setRole(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Role')]]"),
+                    By.cssSelector(".role")));
+            job.setIndustryType(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Industry Type')]]"),
+                    By.cssSelector(".industry-type")));
+            job.setDepartment(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Department')]]"),
+                    By.cssSelector(".department")));
+            job.setEmploymentType(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Employment Type')]]"),
+                    By.cssSelector(".employment-type")));
+            job.setRoleCategory(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Role Category')]]"),
+                    By.cssSelector(".role-category")));
+            job.setEducation(firstText(driver,
+                    By.xpath("//div[contains(@class,'jhc__item__value') and preceding-sibling::div[contains(text(), 'Education')]]"),
+                    By.cssSelector(".education")));
+            job.setKeySkills(firstText(driver,
+                    By.cssSelector("[class*='jhc__skills']"),
+                    By.cssSelector("[class*='key-skill']"),
+                    By.cssSelector(".skills")));
             job.setLogdate(String.valueOf(LocalDateTime.now()));
-
             return job;
-
         } catch (Exception e) {
-            logger.warning("Error extracting job details: " + e.getMessage());
+            logger.warning("Error extracting job details for " + url + ": " + e.getMessage());
             return null;
         }
     }
@@ -524,85 +674,93 @@ public class TwoPhaseNaukriScraper {
             return;
         }
 
-        List<JobListingEntity> toSave = new ArrayList<>(jobBatch);
+        List<JobListingEntity> toSave = new ArrayList<JobListingEntity>(jobBatch);
         jobBatch.clear();
 
-        // Determine if these are new or existing URLs
         boolean isUpsert = Config.isUpsertDuplicates();
-
         int saved = BatchDatabaseHandler.saveJobsBatch(toSave, isUpsert);
         MetricsTracker.incrementJobsSaved(saved);
+        if (!isUpsert) {
+            MetricsTracker.incrementJobsInserted(saved);
+        }
 
         String action = isUpsert ? "updated/inserted" : "inserted";
         logger.info("Batch " + action + ": " + saved + " jobs");
     }
 
-    /**
-     * Flush any remaining jobs in the batch (called at end of Phase 2)
-     */
     public synchronized void flushFinalBatch() {
         flushBatch();
     }
 
     private ChromeOptions buildChromeOptions() {
         ChromeOptions options = new ChromeOptions();
+        options.setPageLoadStrategy(PageLoadStrategy.EAGER);
 
         if (Config.isBrowserHeadless()) {
             options.addArguments("--headless=new");
         }
 
-        // Anti-detection measures
         options.addArguments(
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--no-sandbox",
-            "--disable-gpu",
-            "--window-size=1920,1080",
-            "--disable-web-security",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-infobars",
-            "--disable-notifications",
-            "--disable-popup-blocking",
-            "--start-maximized",
-            "--disable-extensions",
-            "--disable-default-apps",
-            "--disable-background-timer-throttling",
-            "--disable-backgrounding-occluded-windows",
-            "--disable-renderer-backgrounding"
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-gpu",
+                "--window-size=1920,1080",
+                "--disable-infobars",
+                "--disable-notifications",
+                "--disable-popup-blocking",
+                "--disable-extensions",
+                "--disable-default-apps",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--disable-translate",
+                "--mute-audio",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--metrics-recording-only",
+                "--password-store=basic"
         );
-        
-        // Rotate user agents for better stealth (realistic Chrome versions)
-        String[] userAgents = {
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+
+        String[] userAgents = new String[] {
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36"
         };
-        String randomUA = userAgents[(int)(Math.random() * userAgents.length)];
+        String randomUA = userAgents[(int) (Math.random() * userAgents.length)];
         options.addArguments("--user-agent=" + randomUA);
 
-        options.setExperimentalOption("excludeSwitches", new String[]{"enable-automation", "enable-logging"});
+        options.setExperimentalOption("excludeSwitches", new String[] {"enable-automation", "enable-logging"});
         options.setExperimentalOption("useAutomationExtension", false);
-        
-        // Additional stealth preferences
-        Map<String, Object> prefs = new HashMap<>();
+
+        Map<String, Object> prefs = new HashMap<String, Object>();
         prefs.put("credentials_enable_service", false);
         prefs.put("profile.password_manager_enabled", false);
         prefs.put("profile.default_content_setting_values.notifications", 2);
         prefs.put("profile.default_content_settings.popups", 0);
-        
-        // Disable images for speed (optional - can be enabled for more realistic behavior)
         if (Config.isDisableImages()) {
             prefs.put("profile.managed_default_content_settings.images", 2);
         }
-        
         options.setExperimentalOption("prefs", prefs);
-
         return options;
+    }
+
+    private String firstText(WebDriver driver, By... selectors) {
+        for (By selector : selectors) {
+            String text = safeGetText(driver, selector);
+            if (text != null && !text.isEmpty()) {
+                return text;
+            }
+        }
+        return "";
     }
 
     private String safeGetText(WebDriver driver, By selector) {
@@ -613,41 +771,103 @@ public class TwoPhaseNaukriScraper {
         }
     }
 
-    private String safeGetText(WebElement element, By selector) {
-        try {
-            return element.findElement(selector).getText().trim();
-        } catch (NoSuchElementException e) {
+    private String cleanCompanyName(String companyName) {
+        if (companyName == null) {
             return "";
         }
-    }
-
-    private String extractNumber(String text) {
-        if (text == null) return "";
-        return text.replaceAll("[^0-9]", "");
-    }
-
-    private String cleanCompanyName(String companyName) {
-        if (companyName == null) return "";
-        return companyName.replaceAll("\\d+\\.\\d+.*", "").trim();
+        String cleaned = companyName.replaceAll("\\d+\\.\\d+.*", "").trim();
+        // Validate company name length
+        if (cleaned.length() > 200) {
+            logger.fine("Company name too long, truncating: " + cleaned.substring(0, 50) + "...");
+            return cleaned.substring(0, 200);
+        }
+        return cleaned;
     }
 
     private String parsePosted(String postedText) {
-        return postedText != null ? postedText.replace("Posted:", "").trim() : "";
+        if (postedText == null || postedText.isEmpty()) {
+            return "";
+        }
+        String cleaned = postedText.replace("Posted:", "").replace("posted", "").trim();
+        // Validate reasonable date formats
+        if (cleaned.isEmpty() || cleaned.length() > 50) {
+            logger.fine("Suspicious posted date format: " + postedText);
+            return "";
+        }
+        return cleaned;
     }
 
     private String parseOpenings(String openingsText) {
-        if (openingsText == null || openingsText.isEmpty()) return "";
-        return openingsText.replace("opening", "").replace("openings", "").trim();
+        if (openingsText == null || openingsText.isEmpty()) {
+            return "";
+        }
+        String cleaned = openingsText.replace("openings", "").replace("opening", "").trim();
+        // Validate it's a reasonable number
+        try {
+            if (!cleaned.isEmpty()) {
+                int openings = Integer.parseInt(cleaned.replaceAll("[^0-9]", ""));
+                if (openings < 0 || openings > 1000) {
+                    logger.fine("Suspicious openings value: " + openingsText);
+                    return "";
+                }
+            }
+        } catch (NumberFormatException e) {
+            logger.fine("Could not parse openings: " + openingsText);
+            return "";
+        }
+        return cleaned;
     }
 
     private String parseApplications(String applicationsText) {
-        if (applicationsText == null || applicationsText.isEmpty()) return "";
-        return applicationsText.replace("application", "").replace("applications", "").trim();
+        if (applicationsText == null || applicationsText.isEmpty()) {
+            return "";
+        }
+        String cleaned = applicationsText.replace("applications", "").replace("application", "").trim();
+        // Validate it's a reasonable number
+        try {
+            if (!cleaned.isEmpty()) {
+                int apps = Integer.parseInt(cleaned.replaceAll("[^0-9]", ""));
+                if (apps < 0 || apps > 10000) {
+                    logger.fine("Suspicious applications value: " + applicationsText);
+                    return "";
+                }
+            }
+        } catch (NumberFormatException e) {
+            logger.fine("Could not parse applications: " + applicationsText);
+            return "";
+        }
+        return cleaned;
     }
 
     private boolean isValidJob(JobListingEntity job) {
-        return job != null && 
-               job.getUrl() != null && !job.getUrl().isEmpty() &&
-               job.getTitle() != null && !job.getTitle().isEmpty();
+        if (job == null) {
+            return false;
+        }
+        if (job.getUrl() == null || job.getUrl().isEmpty()) {
+            return false;
+        }
+        if (job.getTitle() == null || job.getTitle().isEmpty()) {
+            return false;
+        }
+
+        // Validate URL format
+        if (!job.getUrl().startsWith("http")) {
+            logger.warning("Invalid URL format: " + job.getUrl());
+            return false;
+        }
+
+        // Validate title is not just generic text
+        if (job.getTitle().length() < 3 || job.getTitle().length() > 200) {
+            logger.warning("Suspicious title length for " + job.getUrl() + ": " + job.getTitle().length());
+            return false;
+        }
+
+        // Validate company name if present
+        if (job.getCompanyName() != null && job.getCompanyName().length() > 200) {
+            logger.warning("Company name too long for " + job.getUrl() + ", truncating");
+            job.setCompanyName(job.getCompanyName().substring(0, 200));
+        }
+
+        return true;
     }
 }

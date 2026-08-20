@@ -1,47 +1,53 @@
 package org.dinesh.process;
 
+import org.dinesh.config.Config;
+import org.openqa.selenium.PageLoadStrategy;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
 
+import java.time.Duration;
 import java.util.concurrent.*;
 import java.util.logging.Logger;
 
 /**
- * Manages ChromeDriver lifecycle with proper cleanup.
- * No watchdog timer - relies on try-finally blocks for cleanup.
+ * Manages ChromeDriver lifecycle with timeouts and cleanup that will not
+ * kill the user's own Chrome windows.
  */
 public class ChromeDriverManager {
     private static final Logger logger = Logger.getLogger(ChromeDriverManager.class.getName());
-    
-    /**
-     * Create a ChromeDriver
-     */
+
     public static WebDriver createDriver(ChromeOptions options) {
+        if (options.getCapability("pageLoadStrategy") == null) {
+            options.setPageLoadStrategy(PageLoadStrategy.EAGER);
+        }
         ChromeDriver driver = new ChromeDriver(options);
-        String sessionId = driver.getSessionId().toString();
-        logger.fine("Created ChromeDriver, Session: " + sessionId);
+        int pageLoadTimeout = Config.getPageLoadTimeout();
+        driver.manage().timeouts().pageLoadTimeout(Duration.ofSeconds(pageLoadTimeout));
+        driver.manage().timeouts().scriptTimeout(Duration.ofSeconds(15));
+        driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(0));
+        logger.fine("Created ChromeDriver, Session: " + driver.getSessionId());
         return driver;
     }
-    
-    /**
-     * Cleanup driver with aggressive fallback
-     */
+
     public static void cleanupDriver(WebDriver driver) {
-        if (driver == null) return;
-        
-        // Try normal quit with timeout
+        if (driver == null) {
+            return;
+        }
+
         ExecutorService executor = Executors.newSingleThreadExecutor();
-        Future<?> quitFuture = executor.submit(() -> {
-            try {
-                driver.quit();
-            } catch (Exception e) {
-                // Ignore
+        Future<?> quitFuture = executor.submit(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    driver.quit();
+                } catch (Exception ignored) {
+                }
             }
         });
-        
+
         try {
-            quitFuture.get(10, TimeUnit.SECONDS);
+            quitFuture.get(8, TimeUnit.SECONDS);
             logger.fine("Driver quit successfully");
         } catch (TimeoutException e) {
             logger.warning("Driver quit timeout");
@@ -52,26 +58,24 @@ public class ChromeDriverManager {
             executor.shutdownNow();
         }
     }
-    
+
     /**
-     * Shutdown and cleanup
+     * Only kill leftover chromedriver processes. Never taskkill chrome.exe —
+     * that would close the user's real browser.
      */
     public static void shutdown() {
         logger.info("Shutting down ChromeDriverManager...");
-        
-        // Use kill_chrome.bat for final cleanup on Windows
         try {
             String os = System.getProperty("os.name").toLowerCase();
             if (os.contains("windows")) {
-                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "kill_chrome.bat");
+                ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "taskkill /F /IM chromedriver.exe /T");
                 Process p = pb.start();
-                p.waitFor(10, TimeUnit.SECONDS);
-                logger.info("Executed kill_chrome.bat for cleanup");
+                p.waitFor(8, TimeUnit.SECONDS);
+                logger.info("Cleaned leftover chromedriver processes");
             }
         } catch (Exception e) {
-            logger.fine("Could not run kill_chrome.bat: " + e.getMessage());
+            logger.fine("Could not clean chromedriver processes: " + e.getMessage());
         }
-        
         logger.info("ChromeDriverManager shutdown complete");
     }
 }

@@ -31,7 +31,15 @@ public class BatchDatabaseHandler {
     private static final Set<String> upsertLocks = ConcurrentHashMap.newKeySet();
     
     private static String truncate(String value, int maxLength) {
-        return value != null && value.length() > maxLength ? value.substring(0, maxLength) : value;
+        if (value == null) {
+            return null;
+        }
+        // Remove problematic characters that could cause encoding issues
+        String cleaned = value.replaceAll("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", "");
+        if (cleaned.length() > maxLength) {
+            return cleaned.substring(0, maxLength);
+        }
+        return cleaned;
     }
     
     /**
