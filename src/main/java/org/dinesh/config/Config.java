@@ -1,6 +1,7 @@
 package org.dinesh.config;
 
 import java.io.FileInputStream;
+import java.io.File;
 import java.io.IOException;
 import java.util.Properties;
 import java.util.logging.Logger;
@@ -10,10 +11,19 @@ public class Config {
     private static final Properties props = new Properties();
 
     static {
-        try (FileInputStream fis = new FileInputStream("config.properties")) {
+        String configPath = System.getProperty("scraper.config");
+        if (configPath == null || configPath.trim().isEmpty()) {
+            configPath = System.getenv("SCRAPER_CONFIG");
+        }
+        if (configPath == null || configPath.trim().isEmpty()) {
+            configPath = "config.properties";
+        }
+
+        try (FileInputStream fis = new FileInputStream(configPath)) {
             props.load(fis);
+            logger.info("Loaded scraper configuration from " + new File(configPath).getAbsolutePath());
         } catch (IOException e) {
-            logger.severe("Failed to load config.properties: " + e.getMessage());
+            logger.severe("Failed to load configuration " + configPath + ": " + e.getMessage());
             throw new RuntimeException("Configuration file not found", e);
         }
     }

@@ -1,4 +1,7 @@
-# Database Configuration (unchanged ? pool size sufficient for low concurrency)
+# Copy this file to config.properties. To use another file, set
+# -Dscraper.config=path/to/file or the SCRAPER_CONFIG environment variable.
+
+# Database Configuration
 db.url=jdbc:oracle:thin:@127.0.0.1:1521:XE
 db.user=system
 db.password=root

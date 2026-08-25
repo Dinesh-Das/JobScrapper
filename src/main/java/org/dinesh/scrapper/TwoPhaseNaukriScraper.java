@@ -1,7 +1,6 @@
 package org.dinesh.scrapper;
 
 import org.dinesh.config.Config;
-import org.dinesh.database.BatchDatabaseHandler;
 import org.dinesh.entity.JobListingEntity;
 import org.dinesh.process.ChromeDriverManager;
 import org.dinesh.util.MetricsTracker;
@@ -21,7 +20,6 @@ import org.openqa.selenium.support.ui.WebDriverWait;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -64,14 +62,57 @@ public class TwoPhaseNaukriScraper {
             By.xpath("//*[contains(text(), 'expired') and contains(text(), 'job')]")
     };
 
-    private final List<JobListingEntity> jobBatch = new ArrayList<JobListingEntity>();
-    private final int batchSize;
-
     private static final ThreadLocal<WebDriver> threadDriver = new ThreadLocal<WebDriver>();
     private static final Set<WebDriver> allDrivers = ConcurrentHashMap.newKeySet();
+    private static final Object requestRateLock = new Object();
+    private static long nextRequestAtMillis = 0L;
 
-    public TwoPhaseNaukriScraper() {
-        this.batchSize = Config.getBatchSize();
+    public enum ScrapeStatus {
+        SCRAPED,
+        EXPIRED,
+        FAILED
+    }
+
+    public static final class ScrapeResult {
+        private final String url;
+        private final ScrapeStatus status;
+        private final JobListingEntity job;
+        private final String message;
+
+        private ScrapeResult(String url, ScrapeStatus status, JobListingEntity job, String message) {
+            this.url = url;
+            this.status = status;
+            this.job = job;
+            this.message = message;
+        }
+
+        public static ScrapeResult scraped(String url, JobListingEntity job) {
+            return new ScrapeResult(url, ScrapeStatus.SCRAPED, job, "");
+        }
+
+        public static ScrapeResult expired(String url) {
+            return new ScrapeResult(url, ScrapeStatus.EXPIRED, null, "");
+        }
+
+        public static ScrapeResult failed(String url, String message) {
+            return new ScrapeResult(url, ScrapeStatus.FAILED, null, message == null ? "" : message);
+        }
+
+        public String getUrl() {
+            return url;
+        }
+
+        public ScrapeStatus getStatus() {
+            return status;
+        }
+
+        public JobListingEntity getJob() {
+            return job;
+        }
+
+        public String getMessage() {
+            return message;
+        }
     }
 
     private WebDriver getThreadDriver() {
@@ -143,6 +184,25 @@ public class TwoPhaseNaukriScraper {
         } catch (Exception e) {
             logger.warning("Unexpected error loading page " + url + ": " + e.getMessage());
             throw new RuntimeException("Failed to load page: " + url, e);
+        }
+    }
+
+    /**
+     * Reserve globally spaced request slots. Per-thread sleeps still allow every worker
+     * to hit the site at once, so the request schedule must be shared by all drivers.
+     */
+    private void throttleBeforeRequest() throws InterruptedException {
+        long delay = Math.max(0L, Config.getRateLimitDelay());
+        long waitMillis;
+        synchronized (requestRateLock) {
+            long now = System.currentTimeMillis();
+            long scheduledAt = Math.max(now, nextRequestAtMillis);
+            waitMillis = scheduledAt - now;
+            long jitter = (long) (Math.random() * 250L);
+            nextRequestAtMillis = scheduledAt + delay + jitter;
+        }
+        if (waitMillis > 0L) {
+            Thread.sleep(waitMillis);
         }
     }
 
@@ -218,6 +278,7 @@ public class TwoPhaseNaukriScraper {
         Set<String> urls = new HashSet<String>();
         String searchUrl = Config.getJobSearchUrl().replace("{page}", String.valueOf(pageNo));
         try {
+            throttleBeforeRequest();
             WebDriver driver = getThreadDriver();
             safeGet(driver, searchUrl);
             dismissOverlays(driver);
@@ -255,11 +316,14 @@ public class TwoPhaseNaukriScraper {
                 urls.addAll(extractUrlsViaCss(driver));
             }
 
-            logger.info("Page " + pageNo + ": Found " + urls.size() + " job URLs");
+            if (urls.isEmpty() && !hasExplicitNoResults(driver)) {
+                if (detectCaptcha(driver)) {
+                    throw new Exception("CAPTCHA or rate-limit page detected");
+                }
+                throw new Exception("No job URLs found and no explicit no-results marker was present");
+            }
 
-            long baseDelay = Config.getRateLimitDelay();
-            long jitter = (long) (Math.random() * 400);
-            Thread.sleep(baseDelay + jitter);
+            logger.info("Page " + pageNo + ": Found " + urls.size() + " job URLs");
             return urls;
 
         } catch (SessionNotCreatedException e) {
@@ -274,6 +338,21 @@ public class TwoPhaseNaukriScraper {
             logger.severe("Error collecting URLs from page " + pageNo + " (URL: " + searchUrl + "): " + e.getMessage());
             logger.severe("Exception type: " + e.getClass().getName());
             throw e;
+        }
+    }
+
+    private boolean hasExplicitNoResults(WebDriver driver) {
+        try {
+            JavascriptExecutor js = (JavascriptExecutor) driver;
+            Object raw = js.executeScript(
+                    "var t = (document.body && document.body.innerText || '').toLowerCase();"
+                            + "return t.indexOf('no jobs found') !== -1"
+                            + " || t.indexOf('no results found') !== -1"
+                            + " || t.indexOf('we couldn\\'t find any jobs') !== -1"
+                            + " || t.indexOf('we could not find any jobs') !== -1;");
+            return Boolean.TRUE.equals(raw);
+        } catch (Exception e) {
+            return false;
         }
     }
 
@@ -333,18 +412,22 @@ public class TwoPhaseNaukriScraper {
         return urls;
     }
 
-    public void scrapeJobDetails(String url) throws Exception {
+    public ScrapeResult scrapeJobDetails(String url) {
         int maxRetries = Math.max(1, Config.getMaxRetries());
         Exception lastException = null;
 
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                scrapeJobDetailsInternal(url);
-                return;
+                return scrapeJobDetailsInternal(url);
             } catch (Exception e) {
                 lastException = e;
                 if (attempt < maxRetries) {
-                    Thread.sleep(Config.getRetryDelay() * attempt);
+                    try {
+                        Thread.sleep(Config.getRetryDelay() * attempt);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return ScrapeResult.failed(url, "Interrupted while retrying");
+                    }
                 }
             }
         }
@@ -352,24 +435,21 @@ public class TwoPhaseNaukriScraper {
         logger.warning("Failed to scrape job details for " + url + " after " + maxRetries + " attempts"
                 + (lastException != null ? ": " + lastException.getMessage() : ""));
         MetricsTracker.incrementErrors();
+        return ScrapeResult.failed(url, lastException == null ? "Unknown scrape failure" : lastException.getMessage());
     }
 
-    private void scrapeJobDetailsInternal(String url) throws Exception {
+    private ScrapeResult scrapeJobDetailsInternal(String url) throws Exception {
         try {
+            throttleBeforeRequest();
             WebDriver driver = getThreadDriver();
             safeGet(driver, url);
             dismissOverlays(driver);
             Thread.sleep(Math.max(150, Config.getPageLoadDelay()));
 
-            // Add rate limiting before processing
-            long baseDelay = Config.getRateLimitDelay();
-            long jitter = (long) (Math.random() * 1000);
-            Thread.sleep(baseDelay + jitter);
-
             if (isExpiredJob(driver)) {
                 logger.fine("Skipping expired job: " + url);
                 MetricsTracker.incrementExpiredJobs();
-                return;
+                return ScrapeResult.expired(url);
             }
 
             WebDriverWait wait = new WebDriverWait(driver, Duration.ofSeconds(Math.max(4, Config.getBrowserWaitTimeout() / 2)));
@@ -384,7 +464,7 @@ public class TwoPhaseNaukriScraper {
                 if (isExpiredJob(driver)) {
                     logger.fine("Skipping expired job (after wait): " + url);
                     MetricsTracker.incrementExpiredJobs();
-                    return;
+                    return ScrapeResult.expired(url);
                 }
                 if (detectCaptcha(driver)) {
                     logger.severe("CAPTCHA DETECTED! URL: " + url);
@@ -400,15 +480,11 @@ public class TwoPhaseNaukriScraper {
             }
 
             if (job != null && isValidJob(job)) {
-                addToBatch(job);
-            } else if (!titleReady) {
-                logger.fine("No job details extracted: " + url);
+                MetricsTracker.incrementJobsScraped(1);
+                return ScrapeResult.scraped(url, job);
             }
-
-            // Add rate limiting after processing
-            long postDelay = Config.getRateLimitDelay() / 2;
-            long postJitter = (long) (Math.random() * 500);
-            Thread.sleep(postDelay + postJitter);
+            throw new Exception("No valid job details extracted"
+                    + (titleReady ? " despite a visible title" : " because the title never became visible"));
 
         } catch (SessionNotCreatedException e) {
             logger.warning("Session error for " + url + ", will recreate on retry: " + e.getMessage());
@@ -494,14 +570,6 @@ public class TwoPhaseNaukriScraper {
             return false;
         } catch (Exception e) {
             return false;
-        }
-    }
-
-    private synchronized void addToBatch(JobListingEntity job) {
-        jobBatch.add(job);
-        MetricsTracker.incrementJobsScraped(1);
-        if (jobBatch.size() >= batchSize) {
-            flushBatch();
         }
     }
 
@@ -667,29 +735,6 @@ public class TwoPhaseNaukriScraper {
             logger.warning("Error extracting job details for " + url + ": " + e.getMessage());
             return null;
         }
-    }
-
-    private synchronized void flushBatch() {
-        if (jobBatch.isEmpty()) {
-            return;
-        }
-
-        List<JobListingEntity> toSave = new ArrayList<JobListingEntity>(jobBatch);
-        jobBatch.clear();
-
-        boolean isUpsert = Config.isUpsertDuplicates();
-        int saved = BatchDatabaseHandler.saveJobsBatch(toSave, isUpsert);
-        MetricsTracker.incrementJobsSaved(saved);
-        if (!isUpsert) {
-            MetricsTracker.incrementJobsInserted(saved);
-        }
-
-        String action = isUpsert ? "updated/inserted" : "inserted";
-        logger.info("Batch " + action + ": " + saved + " jobs");
-    }
-
-    public synchronized void flushFinalBatch() {
-        flushBatch();
     }
 
     private ChromeOptions buildChromeOptions() {

@@ -1,10 +1,12 @@
 import org.dinesh.config.Config;
 import org.dinesh.database.BatchDatabaseHandler;
 import org.dinesh.database.ResilientConnectionPool;
+import org.dinesh.entity.JobListingEntity;
 import org.dinesh.process.ChromeDriverManager;
 import org.dinesh.scrapper.TwoPhaseNaukriScraper;
 import org.dinesh.util.CheckpointStore;
 import org.dinesh.util.MetricsTracker;
+import org.dinesh.util.Phase1ProgressTracker;
 import org.dinesh.util.RobotsTxtChecker;
 import io.github.bonigarcia.wdm.WebDriverManager;
 
@@ -12,8 +14,10 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionService;
@@ -22,7 +26,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.LogManager;
 import java.util.logging.Logger;
@@ -31,7 +34,6 @@ public class Main {
     private static final Logger logger = Logger.getLogger(Main.class.getName());
     private static volatile boolean shutdownRequested = false;
     private static volatile boolean cleanedUp = false;
-    private static volatile TwoPhaseNaukriScraper sharedScraper;
     private static final CheckpointStore checkpoint = new CheckpointStore();
 
     static {
@@ -193,20 +195,20 @@ public class Main {
                 return 0;
             }
         });
-        AtomicInteger consecutiveEmpty = new AtomicInteger(0);
-        AtomicBoolean stopPhase1 = new AtomicBoolean(false);
-        AtomicInteger completedCount = new AtomicInteger(0);
-
         int nextIndex = 0;
+        int nextResultIndex = 0;
         int submitted = 0;
         int completed = 0;
-        int inFlight = 0;
+        int processed = 0;
+        boolean stopPhase1 = false;
+        Map<Integer, PageResult> completedByPage = new HashMap<Integer, PageResult>();
+        Phase1ProgressTracker progressTracker = new Phase1ProgressTracker(
+                Config.getEmptyPageLimit(), Config.getCircuitBreakerThreshold());
         int prime = Math.min(threadPoolSize, remaining.size());
 
         while (nextIndex < prime && !shutdownRequested) {
             submitPhase1Page(completion, remaining.get(nextIndex++), threadPageCount);
             submitted++;
-            inFlight++;
         }
 
         logger.info("Phase 1 timeout budget: "
@@ -221,43 +223,65 @@ public class Main {
 
                 PageResult result = future.get();
                 completed++;
-                inFlight--;
-                int doneSoFar = completedCount.incrementAndGet();
+                completedByPage.put(Integer.valueOf(result.page), result);
 
-                if (result.success) {
-                    checkpoint.addUrls(result.urls);
-                    checkpoint.markPageDone(result.page);
-                    MetricsTracker.incrementPagesProcessed();
+                // CompletionService returns results out of order. Apply checkpoint and
+                // consecutive-page decisions only in ascending configured page order.
+                while (nextResultIndex < remaining.size()) {
+                    int expectedPage = remaining.get(nextResultIndex).intValue();
+                    PageResult ordered = completedByPage.remove(Integer.valueOf(expectedPage));
+                    if (ordered == null) {
+                        break;
+                    }
+                    nextResultIndex++;
+                    processed++;
 
-                    if (result.urls == null || result.urls.isEmpty()) {
-                        int empty = consecutiveEmpty.incrementAndGet();
-                        logger.info("Empty page " + result.page + " (" + empty + "/" + Config.getEmptyPageLimit() + " consecutive)");
-                        if (empty >= Config.getEmptyPageLimit()) {
-                            stopPhase1.set(true);
-                            logger.warning("Stopping Phase 1 after " + empty
-                                    + " consecutive empty pages (Naukri likely ran out of results)");
+                    boolean confirmedEmpty = ordered.success
+                            && (ordered.urls == null || ordered.urls.isEmpty());
+                    Phase1ProgressTracker.Decision decision = progressTracker.record(
+                            ordered.page, ordered.success, confirmedEmpty);
+                    stopPhase1 = decision != Phase1ProgressTracker.Decision.CONTINUE;
+
+                    if (ordered.success) {
+                        MetricsTracker.incrementPagesProcessed();
+
+                        if (confirmedEmpty) {
+                            logger.info("Confirmed empty page " + ordered.page + " ("
+                                    + progressTracker.getConsecutiveEmpty() + "/"
+                                    + Config.getEmptyPageLimit() + " consecutive)");
+                            if (decision == Phase1ProgressTracker.Decision.PAUSE_AFTER_EMPTY_PAGES) {
+                                logger.warning("Pausing Phase 1 submission after "
+                                        + progressTracker.getConsecutiveEmpty()
+                                        + " confirmed consecutive no-result pages");
+                            }
+                        } else {
+                            checkpoint.addUrls(ordered.urls);
+                            checkpoint.markPageDone(ordered.page);
                         }
                     } else {
-                        consecutiveEmpty.set(0);
+                        logger.warning("Page " + ordered.page + " was not checkpointed: " + ordered.errorMessage);
+                        if (decision == Phase1ProgressTracker.Decision.PAUSE_AFTER_FAILURES) {
+                            logger.severe("Pausing Phase 1 after "
+                                    + progressTracker.getConsecutiveFailures()
+                                    + " consecutive page failures; no failed pages were checkpointed");
+                        }
                     }
                 }
 
-                if (doneSoFar % 25 == 0 || doneSoFar == remaining.size()) {
-                    logger.info("Phase 1 progress: " + doneSoFar + "/" + remaining.size()
+                if (processed > 0 && (processed % 25 == 0 || processed == remaining.size())) {
+                    logger.info("Phase 1 progress: " + processed + "/" + remaining.size()
                             + " pages, " + checkpoint.urlCount() + " unique URLs");
                 }
 
-                boolean canSubmitMore = !stopPhase1.get()
+                boolean canSubmitMore = !stopPhase1
                         && !shutdownRequested
                         && nextIndex < remaining.size();
                 if (canSubmitMore) {
                     submitPhase1Page(completion, remaining.get(nextIndex++), threadPageCount);
                     submitted++;
-                    inFlight++;
                 }
             } catch (Exception e) {
                 completed++;
-                inFlight--;
                 MetricsTracker.incrementErrors();
                 logger.warning("Phase 1 task failed: " + e.getMessage());
             }
@@ -294,6 +318,7 @@ public class Main {
         result.page = pageNumber;
         result.success = false;
         result.urls = Collections.emptySet();
+        result.errorMessage = "Unknown page failure";
         try {
             if (shutdownRequested) {
                 return result;
@@ -309,8 +334,10 @@ public class Main {
             TwoPhaseNaukriScraper scraper = new TwoPhaseNaukriScraper();
             result.urls = scraper.collectUrlsFromPage(pageNumber);
             result.success = true;
+            result.errorMessage = "";
         } catch (Exception e) {
             logger.severe("Failed to collect URLs from page " + pageNumber + ": " + e.getMessage());
+            result.errorMessage = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             MetricsTracker.incrementErrors();
         }
         return result;
@@ -329,9 +356,7 @@ public class Main {
             }
         });
 
-        sharedScraper = new TwoPhaseNaukriScraper();
-        final TwoPhaseNaukriScraper scraper = sharedScraper;
-        final AtomicInteger processedCount = new AtomicInteger(0);
+        final TwoPhaseNaukriScraper scraper = new TwoPhaseNaukriScraper();
         final int totalUrls = urlsToScrape.size();
         final ThreadLocal<Integer> threadUrlCount = ThreadLocal.withInitial(new java.util.function.Supplier<Integer>() {
             @Override
@@ -340,18 +365,21 @@ public class Main {
             }
         });
         final int restartEvery = Math.max(20, Config.getDriverRestartEvery());
+        CompletionService<TwoPhaseNaukriScraper.ScrapeResult> completion =
+                new ExecutorCompletionService<TwoPhaseNaukriScraper.ScrapeResult>(executor);
+        int submitted = 0;
 
         for (final String url : urlsToScrape) {
             if (shutdownRequested) {
                 logger.info("Shutdown requested, stopping job detail scraping");
                 break;
             }
-            executor.submit(new Runnable() {
+            completion.submit(new Callable<TwoPhaseNaukriScraper.ScrapeResult>() {
                 @Override
-                public void run() {
+                public TwoPhaseNaukriScraper.ScrapeResult call() {
                     try {
                         if (shutdownRequested) {
-                            return;
+                            return TwoPhaseNaukriScraper.ScrapeResult.failed(url, "Shutdown requested");
                         }
                         int count = threadUrlCount.get().intValue();
                         if (count > 0 && count % restartEvery == 0) {
@@ -360,43 +388,99 @@ public class Main {
                             TwoPhaseNaukriScraper.cleanupThreadDriver();
                         }
                         threadUrlCount.set(Integer.valueOf(count + 1));
-
-                        scraper.scrapeJobDetails(url);
-                        checkpoint.markPhase2Done(url);
-
-                        int processed = processedCount.incrementAndGet();
-                        if (processed % 100 == 0 || processed == totalUrls) {
-                            logger.info("Phase 2 progress: " + processed + "/" + totalUrls + " URLs processed ("
-                                    + String.format("%.1f", (processed * 100.0 / totalUrls)) + "%)");
-                        }
+                        return scraper.scrapeJobDetails(url);
                     } catch (Exception e) {
-                        logger.warning("Failed to scrape job details for " + url + ": " + e.getMessage());
+                        MetricsTracker.incrementErrors();
+                        return TwoPhaseNaukriScraper.ScrapeResult.failed(url,
+                                e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
                     }
                 }
             });
+            submitted++;
         }
 
         executor.shutdown();
+        List<JobListingEntity> pendingJobs = new ArrayList<JobListingEntity>();
+        int completed = 0;
         try {
             long estimatedMinutes = (totalUrls * 3L) / 60;
             long timeoutHours = Math.max(2, estimatedMinutes / 60 + 1);
             logger.info("Phase 2 timeout set to " + timeoutHours + " hours (estimated "
                     + estimatedMinutes + " minutes)");
-            if (!executor.awaitTermination(timeoutHours, TimeUnit.HOURS)) {
+
+            long deadline = System.nanoTime() + TimeUnit.HOURS.toNanos(timeoutHours);
+            while (completed < submitted && !shutdownRequested) {
+                long remainingNanos = deadline - System.nanoTime();
+                if (remainingNanos <= 0L) {
+                    break;
+                }
+                Future<TwoPhaseNaukriScraper.ScrapeResult> future =
+                        completion.poll(Math.min(remainingNanos, TimeUnit.SECONDS.toNanos(2)), TimeUnit.NANOSECONDS);
+                if (future == null) {
+                    continue;
+                }
+
+                TwoPhaseNaukriScraper.ScrapeResult result = future.get();
+                completed++;
+                if (result.getStatus() == TwoPhaseNaukriScraper.ScrapeStatus.SCRAPED) {
+                    pendingJobs.add(result.getJob());
+                    if (pendingJobs.size() >= Config.getBatchSize()) {
+                        persistAndCheckpoint(pendingJobs);
+                    }
+                } else if (result.getStatus() == TwoPhaseNaukriScraper.ScrapeStatus.EXPIRED) {
+                    checkpoint.markPhase2Done(result.getUrl());
+                } else {
+                    logger.warning("Phase 2 URL left retryable: " + result.getUrl() + " — " + result.getMessage());
+                }
+
+                if (completed % 100 == 0 || completed == submitted) {
+                    logger.info("Phase 2 progress: " + completed + "/" + submitted + " URLs processed ("
+                            + String.format("%.1f", (completed * 100.0 / submitted)) + "%)");
+                }
+            }
+
+            if (completed < submitted) {
                 logger.severe("Phase 2 timeout after " + timeoutHours + " hours, forcing shutdown...");
                 executor.shutdownNow();
+            } else if (!executor.awaitTermination(1, TimeUnit.MINUTES)) {
+                executor.shutdownNow();
             }
-        } catch (InterruptedException e) {
-            logger.severe("Phase 2 interrupted");
+        } catch (Exception e) {
+            logger.severe("Phase 2 coordinator failed: " + e.getMessage());
             executor.shutdownNow();
-            Thread.currentThread().interrupt();
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
         }
 
         logger.info("Cleaning up thread-local drivers...");
         TwoPhaseNaukriScraper.cleanupAllThreadDrivers();
-        logger.info("Flushing final batch...");
-        scraper.flushFinalBatch();
-        sharedScraper = null;
+        persistAndCheckpoint(pendingJobs);
+    }
+
+    private static void persistAndCheckpoint(List<JobListingEntity> pendingJobs) {
+        if (pendingJobs == null || pendingJobs.isEmpty()) {
+            return;
+        }
+
+        List<JobListingEntity> toSave = new ArrayList<JobListingEntity>(pendingJobs);
+        boolean isUpsert = Config.isUpsertDuplicates();
+        int saved = BatchDatabaseHandler.saveJobsBatch(toSave, isUpsert);
+        MetricsTracker.incrementJobsSaved(saved);
+        if (!isUpsert) {
+            MetricsTracker.incrementJobsInserted(saved);
+        }
+
+        if (saved == toSave.size()) {
+            for (JobListingEntity job : toSave) {
+                checkpoint.markPhase2Done(job.getUrl());
+            }
+            logger.info("Persisted and checkpointed " + saved + " jobs");
+        } else {
+            logger.severe("Database persisted " + saved + "/" + toSave.size()
+                    + " scraped jobs; the batch was not checkpointed and will be reconciled on the next run");
+        }
+        pendingJobs.clear();
     }
 
     private static void importLegacyCheckpoint() {
@@ -437,13 +521,6 @@ public class Main {
         cleanedUp = true;
         logger.info("Cleaning up resources...");
         try {
-            if (sharedScraper != null) {
-                sharedScraper.flushFinalBatch();
-            }
-        } catch (Exception e) {
-            logger.warning("Error flushing final batch: " + e.getMessage());
-        }
-        try {
             TwoPhaseNaukriScraper.cleanupAllThreadDrivers();
         } catch (Exception e) {
             logger.warning("Error cleaning drivers: " + e.getMessage());
@@ -464,5 +541,6 @@ public class Main {
         int page;
         boolean success;
         Set<String> urls;
+        String errorMessage;
     }
 }
