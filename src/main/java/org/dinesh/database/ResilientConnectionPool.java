@@ -235,6 +235,17 @@ public class ResilientConnectionPool {
         }
         return dataSource;
     }
+
+    static void discardConnection(Connection connection) throws SQLException {
+        HikariDataSource pool = dataSource;
+        if (pool != null && connection instanceof ConnectionWrapper) {
+            // Evict the live Hikari proxy, not our accounting wrapper. Closing
+            // an uncertain transaction must not recycle it into the pool.
+            pool.evictConnection(((ConnectionWrapper) connection).delegate);
+        } else {
+            connection.abort(Runnable::run);
+        }
+    }
     
     /**
      * Pool statistics

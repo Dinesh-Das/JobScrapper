@@ -10,6 +10,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -145,24 +146,59 @@ public class BatchDatabaseHandler {
         if (jobs == null || jobs.isEmpty()) {
             return 0;
         }
-        
+        return saveJobsBatch(jobs, forceUpsert, Config.getDbSubBatchSize(),
+                DB_RETRY_DELAY, BatchDatabaseHandler::saveSubBatch);
+    }
+
+    @FunctionalInterface
+    interface SubBatchOperation {
+        int save(List<JobListingEntity> jobs, boolean forceUpsert) throws SQLException;
+    }
+
+    static final class CommitOutcomeUnknownException extends SQLException {
+        CommitOutcomeUnknownException(SQLException cause) {
+            super("Transaction outcome is unknown; reconcile database state before retrying", cause);
+        }
+    }
+
+    static void finishTransaction(Connection connection, boolean commit) throws SQLException {
+        try {
+            if (commit) connection.commit();
+            else connection.rollback();
+        } catch (SQLException failure) {
+            // Do not put an uncertain transaction back into service or enable
+            // auto-commit: either can accidentally commit unacknowledged work.
+            try {
+                ResilientConnectionPool.discardConnection(connection);
+            } catch (SQLException abortFailure) {
+                failure.addSuppressed(abortFailure);
+            }
+            throw new CommitOutcomeUnknownException(failure);
+        }
+    }
+
+    static int saveJobsBatch(List<JobListingEntity> jobs, boolean forceUpsert,
+                             int subBatchSize, long retryDelay, SubBatchOperation operation) {
+        if (jobs == null || jobs.isEmpty()) {
+            return 0;
+        }
+        if (subBatchSize < 1 || retryDelay < 0) {
+            throw new IllegalArgumentException("Sub-batch size must be positive and retry delay nonnegative");
+        }
         List<JobListingEntity> jobsToSave = new ArrayList<>();
-        int existingCount = 0;  // Track how many URLs already exist (will be updated)
-        int newCount = 0;       // Track how many URLs are new (will be inserted)
+        Set<String> previouslyExisting = new HashSet<>();
         
         if (forceUpsert) {
             // UPSERT mode: Use upsertLocks to prevent concurrent MERGE on same URL
             for (JobListingEntity job : jobs) {
-                if (job != null && job.getUrl() != null) {
+                if (job != null && job.getUrl() != null && !job.getUrl().isEmpty()) {
                     // Try to acquire upsert lock - returns true if URL was not already being upserted
                     if (upsertLocks.add(job.getUrl())) {
                         jobsToSave.add(job);  // This thread won the race, proceed with MERGE
                         
                         // Check if URL exists in cache to track insert vs update
                         if (cacheInitialized && urlCache.contains(job.getUrl())) {
-                            existingCount++;  // Will be an UPDATE
-                        } else {
-                            newCount++;  // Will be an INSERT
+                            previouslyExisting.add(job.getUrl());
                         }
                     }
                     // else: Another thread is already upserting this URL, skip it
@@ -171,86 +207,89 @@ public class BatchDatabaseHandler {
         } else if (cacheInitialized) {
             // INSERT mode: Use urlCache to prevent inserting URLs that already exist
             for (JobListingEntity job : jobs) {
-                if (job != null && job.getUrl() != null) {
+                if (job != null && job.getUrl() != null && !job.getUrl().isEmpty()) {
                     // Try to add to cache - returns true if URL was not already present
                     if (urlCache.add(job.getUrl())) {
                         jobsToSave.add(job);  // This thread won the race, proceed with insert
-                        newCount++;  // All are new inserts in this mode
                     }
                     // else: Another thread already claimed this URL, skip it
                 }
             }
         } else {
             // Cache not initialized - save all jobs
-            jobsToSave = jobs;
-            newCount = jobs.size();  // Assume all are new
+            for (JobListingEntity job : jobs) {
+                if (job != null && job.getUrl() != null && !job.getUrl().isEmpty()) {
+                    jobsToSave.add(job);
+                }
+            }
         }
         
         if (jobsToSave.isEmpty()) {
             return 0;  // All URLs were already claimed by other threads
         }
         
-        int attempt = 0;
-        Exception lastException = null;
-        
-        while (attempt < MAX_DB_RETRIES) {
-            attempt++;
-            try {
-                int saved = saveJobsBatchInternal(jobsToSave, forceUpsert);
-                
-                // Track insert/update metrics
-                if (forceUpsert) {
-                    MetricsTracker.incrementJobsUpdated(existingCount);
-                    MetricsTracker.incrementJobsInserted(newCount);
-                }
-                
-                // Release upsert locks on success
-                if (forceUpsert) {
-                    for (JobListingEntity job : jobsToSave) {
-                        if (job != null && job.getUrl() != null) {
-                            upsertLocks.remove(job.getUrl());
+        Set<String> acknowledged = new HashSet<>();
+        int totalSaved = 0;
+        try {
+            for (int start = 0; start < jobsToSave.size(); start += subBatchSize) {
+                List<JobListingEntity> subBatch = jobsToSave.subList(
+                        start, Math.min(start + subBatchSize, jobsToSave.size()));
+                boolean complete = false;
+                for (int attempt = 1; attempt <= MAX_DB_RETRIES; attempt++) {
+                    if (Thread.currentThread().isInterrupted()) return totalSaved;
+                    try {
+                        int saved = operation.save(subBatch, forceUpsert);
+                        if (saved != subBatch.size()) {
+                            LOGGER.severe("Sub-batch did not acknowledge every URL; reconcile before retrying");
+                            return totalSaved;
+                        }
+                        for (JobListingEntity job : subBatch) acknowledged.add(job.getUrl());
+                        totalSaved += saved;
+                        if (forceUpsert) {
+                            int updated = 0;
+                            for (JobListingEntity job : subBatch) {
+                                if (previouslyExisting.contains(job.getUrl())) updated++;
+                            }
+                            MetricsTracker.incrementJobsUpdated(updated);
+                            MetricsTracker.incrementJobsInserted(saved - updated);
+                        }
+                        complete = true;
+                        break;
+                    } catch (CommitOutcomeUnknownException e) {
+                        LOGGER.log(Level.SEVERE, "Sub-batch transaction outcome is unknown; stopping for reconciliation", e);
+                        return totalSaved;
+                    } catch (SQLException e) {
+                        LOGGER.log(Level.WARNING, "Sub-batch save attempt " + attempt + " failed", e);
+                        if (attempt < MAX_DB_RETRIES) {
+                            try {
+                                Thread.sleep(retryDelay * attempt);
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                return totalSaved;
+                            }
                         }
                     }
                 }
-                
-                return saved;
-                
-            } catch (SQLException e) {
-                lastException = e;
-                LOGGER.log(Level.WARNING, "Database save attempt " + attempt + " failed", e);
-                
-                if (attempt < MAX_DB_RETRIES) {
-                    try {
-                        Thread.sleep(DB_RETRY_DELAY * attempt); // Exponential backoff
-                    } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        break;
+                if (!complete) {
+                    LOGGER.severe("Sub-batch exhausted retries; remaining URLs stay retryable");
+                    return totalSaved;
+                }
+            }
+            return totalSaved;
+        } finally {
+            for (JobListingEntity job : jobsToSave) {
+                if (forceUpsert) {
+                    upsertLocks.remove(job.getUrl());
+                }
+                if (cacheInitialized) {
+                    if (acknowledged.contains(job.getUrl())) {
+                        urlCache.add(job.getUrl());
+                    } else if (!forceUpsert) {
+                        urlCache.remove(job.getUrl());
                     }
                 }
             }
         }
-        
-        LOGGER.log(Level.SEVERE, "All " + MAX_DB_RETRIES + " database save attempts failed", lastException);
-        
-        // Release upsert locks on failure
-        if (forceUpsert) {
-            for (JobListingEntity job : jobsToSave) {
-                if (job != null && job.getUrl() != null) {
-                    upsertLocks.remove(job.getUrl());
-                }
-            }
-        }
-        
-        // Remove URLs from cache on failure so they can be retried later (INSERT mode only)
-        if (!forceUpsert && cacheInitialized) {
-            for (JobListingEntity job : jobsToSave) {
-                if (job != null && job.getUrl() != null) {
-                    urlCache.remove(job.getUrl());
-                }
-            }
-        }
-        
-        return 0;
     }
     
     /**
@@ -259,31 +298,6 @@ public class BatchDatabaseHandler {
      */
     public static int saveJobsBatch(List<JobListingEntity> jobs) {
         return saveJobsBatch(jobs, false);
-    }
-    
-    /**
-     * Internal method to save jobs batch
-     * Uses MERGE for UPSERT or INSERT based on forceUpsert flag
-     * Safe from deadlocks because atomic locks ensure only one thread per URL
-     */
-    private static int saveJobsBatchInternal(List<JobListingEntity> jobs, boolean forceUpsert) throws SQLException {
-        if (jobs == null || jobs.isEmpty()) {
-            LOGGER.log(Level.WARNING, "No jobs to save");
-            return 0;
-        }
-        
-        // Process in smaller sub-batches to avoid connection leak detection
-        // Large batches with CLOBs can hold connections for too long
-        final int SUB_BATCH_SIZE = Config.getDbSubBatchSize();
-        int totalSaved = 0;
-        
-        for (int i = 0; i < jobs.size(); i += SUB_BATCH_SIZE) {
-            int endIndex = Math.min(i + SUB_BATCH_SIZE, jobs.size());
-            List<JobListingEntity> subBatch = jobs.subList(i, endIndex);
-            totalSaved += saveSubBatch(subBatch, forceUpsert);
-        }
-        
-        return totalSaved;
     }
     
     /**
@@ -421,14 +435,22 @@ public class BatchDatabaseHandler {
                     savedCount++;
                     
                 } catch (SQLException e) {
-                    LOGGER.log(Level.WARNING, "Failed to add job to batch: " + job.getUrl(), e);
+                    // Acknowledgement is for the whole chunk, so never commit a
+                    // subset after silently skipping a row that failed binding.
+                    throw new SQLException("Could not prepare the complete sub-batch", e);
                 }
             }
             
             // Execute batch BEFORE freeing CLOBs
             if (savedCount > 0) {
                 int[] results = ps.executeBatch();
-                conn.commit();
+                if (results.length != savedCount) {
+                    throw new SQLException("Database did not acknowledge every batch statement");
+                }
+                for (int result : results) {
+                    if (result == Statement.EXECUTE_FAILED) throw new SQLException("Batch statement failed");
+                }
+                finishTransaction(conn, true);
                 LOGGER.log(Level.INFO, "Batch saved {0} jobs successfully", savedCount);
             }
             
@@ -437,12 +459,8 @@ public class BatchDatabaseHandler {
         } catch (SQLException e) {
             LOGGER.log(Level.SEVERE, "Batch insert failed", e);
             // Rollback on error
-            if (conn != null) {
-                try {
-                    conn.rollback();
-                } catch (SQLException ex) {
-                    LOGGER.log(Level.SEVERE, "Rollback failed", ex);
-                }
+            if (conn != null && !(e instanceof CommitOutcomeUnknownException)) {
+                finishTransaction(conn, false);
             }
             throw e; // Re-throw for retry logic
         } finally {
@@ -457,10 +475,12 @@ public class BatchDatabaseHandler {
             
             // Always close resources
             try {
-                if (ps != null) ps.close();
-                if (conn != null) {
-                    conn.setAutoCommit(true); // Reset auto-commit
-                    conn.close();
+                try {
+                    if (ps != null) ps.close();
+                } finally {
+                    // Hikari resets a resolved connection when it returns to
+                    // the pool. Uncertain transactions were discarded above.
+                    if (conn != null) conn.close();
                 }
             } catch (SQLException e) {
                 LOGGER.log(Level.WARNING, "Error closing resources", e);
